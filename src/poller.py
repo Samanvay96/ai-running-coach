@@ -16,7 +16,7 @@ from src.db import Database
 from src.garmin_client import GarminClient
 from src.training_plan import TrainingPlan
 from src.coach import Coach, format_pace
-from src.telegram_bot import send_coaching_message
+from src.telegram_bot import send_coaching_message, send_error_alert
 
 
 def poll():
@@ -25,6 +25,7 @@ def poll():
         garmin = GarminClient(GARMIN_EMAIL, GARMIN_PASSWORD, db)
     except Exception as e:
         log.error("Failed to connect to Garmin: %s", e)
+        send_error_alert(f"Garmin login failed: {e}")
         db.close()
         return
 
@@ -88,6 +89,7 @@ def poll():
             new_count += 1
         except Exception as e:
             log.error("Failed to analyze/send activity %s: %s", activity_id, e)
+            send_error_alert(f"Failed to analyze activity {activity_id}: {e}")
 
     if new_count == 0:
         log.info("No new activities found.")

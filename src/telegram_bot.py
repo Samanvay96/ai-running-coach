@@ -28,6 +28,17 @@ def send_coaching_message(text: str):
     asyncio.run(_send_message(text))
 
 
+def send_error_alert(error: str):
+    """Send an error alert to Telegram."""
+    msg = f"[AI Coach Error]\n\n{error}"
+    if len(msg) > 4096:
+        msg = msg[:4093] + "..."
+    try:
+        asyncio.run(_send_message(msg))
+    except Exception:
+        pass  # Don't crash if we can't send the alert
+
+
 # --- Interactive bot ---
 
 class CoachBot:

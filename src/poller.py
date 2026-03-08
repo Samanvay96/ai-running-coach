@@ -4,6 +4,7 @@
 import json
 import logging
 import sys
+from datetime import date, timedelta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +53,11 @@ def poll():
         avg_speed = activity.get("averageSpeed") or 0
         avg_pace = format_pace(avg_speed)
 
+        avg_cadence = activity.get("averageRunningCadenceInStepsPerMinute")
+        elevation_gain = activity.get("elevationGain")
+        elevation_loss = activity.get("elevationLoss")
+        anaerobic_te = activity.get("anaerobicTrainingEffect")
+
         db.save_activity(
             activity_id=activity_id,
             start_time=activity.get("startTimeLocal", ""),
@@ -66,6 +72,10 @@ def poll():
             vo2max=activity.get("vO2MaxValue"),
             raw_json=json.dumps(activity),
             splits_json=json.dumps(splits),
+            avg_cadence=avg_cadence,
+            elevation_gain=elevation_gain,
+            elevation_loss=elevation_loss,
+            anaerobic_te=anaerobic_te,
         )
 
         # Build activity dict for coach (matches what coach.analyze_run expects)
@@ -78,6 +88,11 @@ def poll():
             "max_hr": activity.get("maxHR"),
             "calories": activity.get("calories"),
             "aerobic_te": activity.get("aerobicTrainingEffect"),
+            "anaerobic_te": anaerobic_te,
+            "avg_cadence": avg_cadence,
+            "elevation_gain": elevation_gain,
+            "elevation_loss": elevation_loss,
+            "training_effect_label": activity.get("trainingEffectLabel"),
             "splits_json": json.dumps(splits),
         }
 
@@ -95,6 +110,39 @@ def poll():
         log.info("No new activities found.")
     else:
         log.info("Processed %d new activities.", new_count)
+
+    # Fetch and store training status snapshot
+    try:
+        ts = garmin.get_training_status()
+        if ts:
+            db.save_training_status(
+                snapshot_date=date.today().isoformat(),
+                training_load_7d=ts.get("weeklyTrainingLoad"),
+                recovery_time_hours=ts.get("recoveryTimeInHours"),
+                vo2max=ts.get("vo2MaxValue"),
+                training_status_label=ts.get("trainingStatusLabel"),
+                raw_json=json.dumps(ts),
+            )
+            log.info("Training status snapshot saved")
+    except Exception as e:
+        log.warning("Failed to save training status: %s", e)
+
+    # Weekly summary — trigger on Sunday
+    today = date.today()
+    if today.weekday() == 6:  # Sunday
+        week_start = (today - timedelta(days=6)).isoformat()
+        if not db.weekly_summary_sent(week_start):
+            try:
+                week_end = today.isoformat()
+                summary = coach.weekly_summary(week_start, week_end)
+                week = plan.get_week_for_date(today)
+                week_num = week.week_number if week else 0
+                db.save_weekly_summary(week_num, week_start, week_end, summary)
+                send_coaching_message(summary)
+                log.info("Weekly summary sent for week starting %s", week_start)
+            except Exception as e:
+                log.error("Failed to send weekly summary: %s", e)
+                send_error_alert(f"Weekly summary failed: {e}")
 
     db.close()
 

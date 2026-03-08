@@ -5,7 +5,7 @@ from datetime import date
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH
+from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH, RACE_DATE, PLAN_START_DATE
 from .db import Database
 from .training_plan import TrainingPlan
 from .coach import Coach
@@ -76,9 +76,25 @@ class CoachBot:
                 f"Notes: {week.notes}"
             )
         else:
-            weekday = today.strftime("%A")
             if week:
-                msg = f"No run prescribed today ({weekday}). Rest or cross-training day.\n\nNotes: {week.notes}"
+                weekday = today.strftime("%A")
+                # Show what's coming next
+                next_runs = []
+                if today.weekday() < 1:
+                    next_runs.append(f"Tue: {week.tuesday.description}")
+                if today.weekday() < 3:
+                    next_runs.append(f"Thu: {week.thursday.description}")
+                if today.weekday() < 5:
+                    next_runs.append(f"Sat: {week.saturday.description}")
+
+                msg = f"Week {week.week_number} ({week.phase}) - {today.strftime('%A, %b %d')}\n\n"
+                msg += f"No run today — rest up!\n\n"
+                if today.weekday() == 0:
+                    msg += f"Cross-training: {week.monday}\n\n"
+                if next_runs:
+                    msg += "Coming up:\n" + "\n".join(next_runs)
+                else:
+                    msg += "You've finished this week's runs. Recover well!"
             else:
                 msg = "You're outside the training plan period."
         await update.message.reply_text(msg)
@@ -96,11 +112,31 @@ class CoachBot:
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
+
+        # Race countdown header
+        countdown = self.coach._race_countdown()
+        countdown_text = (
+            f"Race: {countdown['days_remaining']} days to Lisbon Marathon\n"
+            f"Plan: Week {countdown['current_week']}/{countdown['total_weeks']} "
+            f"({countdown['pct_complete']}% complete)\n"
+            f"Weeks remaining: {countdown['weeks_remaining']}\n\n"
+        )
+
+        # Training status from Garmin
+        ts = self.db.get_latest_training_status()
+        if ts:
+            countdown_text += (
+                f"Training load (7d): {ts.get('training_load_7d', 'N/A')}\n"
+                f"Recovery time: {ts.get('recovery_time_hours', 'N/A')}h\n"
+                f"VO2max: {ts.get('vo2max', 'N/A')}\n"
+                f"Status: {ts.get('training_status_label', 'N/A')}\n\n"
+            )
+
         response = self.coach.chat(
             "Give me a brief training status summary based on my recent runs. "
             "How am I tracking against the plan?"
         )
-        await update.message.reply_text(response)
+        await update.message.reply_text(countdown_text + response)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):

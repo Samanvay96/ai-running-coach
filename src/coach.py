@@ -1,9 +1,10 @@
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import anthropic
 
+from .config import RACE_DATE, PLAN_START_DATE
 from .db import Database
 from .training_plan import TrainingPlan
 
@@ -140,6 +141,17 @@ COACHING STYLE:
             else "No run prescribed (rest day or unscheduled run)"
         )
 
+        # Training status context
+        ts = self.db.get_latest_training_status()
+        training_status_text = "Not available"
+        if ts:
+            training_status_text = (
+                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
+                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
+                f"VO2max: {ts.get('vo2max', 'N/A')} | "
+                f"Status: {ts.get('training_status_label', 'N/A')}"
+            )
+
         user_prompt = f"""Analyze this run and provide coaching feedback.
 
 TODAY'S RUN ({weekday_name}):
@@ -149,7 +161,13 @@ TODAY'S RUN ({weekday_name}):
 - Avg HR: {activity.get('avg_hr', 'N/A')} bpm
 - Max HR: {activity.get('max_hr', 'N/A')} bpm
 - Calories: {activity.get('calories', 'N/A')}
-- Aerobic Training Effect: {activity.get('aerobic_te', 'N/A')}
+- Avg Cadence: {activity.get('avg_cadence', 'N/A')} spm
+- Elevation: +{activity.get('elevation_gain', 'N/A')}m / -{activity.get('elevation_loss', 'N/A')}m
+- Aerobic TE: {activity.get('aerobic_te', 'N/A')} | Anaerobic TE: {activity.get('anaerobic_te', 'N/A')}
+- Garmin Assessment: {activity.get('training_effect_label', 'N/A')}
+
+TRAINING STATUS:
+{training_status_text}
 
 SPLITS:
 {format_splits(activity.get('splits_json', ''))}
@@ -164,13 +182,102 @@ Provide:
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
 3. HR/effort analysis
-4. One thing done well
-5. One thing to watch or improve
-6. Brief look-ahead to next scheduled run"""
+4. Cadence & elevation note (if relevant)
+5. One thing done well
+6. One thing to watch or improve
+7. Brief look-ahead to next scheduled run"""
 
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=1024,
+            system=self._build_system_prompt(),
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return response.content[0].text
+
+    def _race_countdown(self) -> dict:
+        today = date.today()
+        days_remaining = (RACE_DATE - today).days
+        total_weeks = 32
+        elapsed_weeks = (today - PLAN_START_DATE).days / 7
+        current_week = min(max(int(elapsed_weeks) + 1, 1), total_weeks)
+        pct_complete = min(elapsed_weeks / total_weeks * 100, 100)
+        weeks_remaining = max((RACE_DATE - today).days / 7, 0)
+        return {
+            "days_remaining": days_remaining,
+            "current_week": current_week,
+            "total_weeks": total_weeks,
+            "pct_complete": round(pct_complete, 1),
+            "weeks_remaining": round(weeks_remaining, 1),
+        }
+
+    def weekly_summary(self, week_start: str, week_end: str) -> str:
+        activities = self.db.get_activities_for_range(week_start, week_end + "T23:59:59")
+        countdown = self._race_countdown()
+        run_date = date.fromisoformat(week_start)
+        week = self.plan.get_week_for_date(run_date)
+
+        # Summarize actual training
+        total_km = sum(a.get("distance_km", 0) for a in activities)
+        num_runs = len(activities)
+        avg_paces = [a.get("avg_pace_min_km", "") for a in activities if a.get("avg_pace_min_km")]
+
+        week_info = f"Week {week.week_number} ({week.phase})" if week else "Unknown week"
+        prescribed_km = week.weekly_km_target if week else 0
+
+        activities_text = "\n".join(
+            f"  {a.get('start_time', '?')[:10]}: {a.get('distance_km', 0):.1f}km "
+            f"at {a.get('avg_pace_min_km', 'N/A')}/km | HR {a.get('avg_hr', 'N/A')} | "
+            f"Cadence {a.get('avg_cadence', 'N/A')} | "
+            f"Elev +{a.get('elevation_gain', 'N/A')}m"
+            for a in activities
+        ) or "  No runs recorded"
+
+        # Training status
+        ts = self.db.get_latest_training_status()
+        ts_text = "Not available"
+        if ts:
+            ts_text = (
+                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
+                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
+                f"VO2max: {ts.get('vo2max', 'N/A')} | "
+                f"Status: {ts.get('training_status_label', 'N/A')}"
+            )
+
+        user_prompt = f"""Generate a weekly training summary and review.
+
+WEEK: {week_info} ({week_start} to {week_end})
+
+RACE COUNTDOWN:
+- Lisbon Marathon: {countdown['days_remaining']} days away
+- Training progress: Week {countdown['current_week']}/{countdown['total_weeks']} ({countdown['pct_complete']}% complete)
+- Weeks remaining: {countdown['weeks_remaining']}
+
+ACTUAL TRAINING THIS WEEK:
+- Total runs: {num_runs}
+- Total distance: {total_km:.1f} km (prescribed: {prescribed_km} km)
+{activities_text}
+
+TRAINING STATUS:
+{ts_text}
+
+PRESCRIBED THIS WEEK:
+{self.plan.get_week_summary(week) if week else 'No plan data'}
+
+Provide:
+1. Week headline (e.g. "Strong week — hit all targets")
+2. Volume comparison (actual vs prescribed km)
+3. Key observations from the runs (pace trends, HR patterns, cadence)
+4. Training load assessment
+5. What went well this week
+6. Focus for next week
+7. Race countdown motivation (mention days/weeks remaining)
+
+Keep it Telegram-friendly (under 3000 chars)."""
+
+        response = self.client.messages.create(
+            model=MODEL,
+            max_tokens=1500,
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
         )

@@ -1,0 +1,6 @@
+Lisbon Marathon Sub4 Plan.xlsx
+.env
+data/
+__pycache__/
+*.pyc
+.venv/

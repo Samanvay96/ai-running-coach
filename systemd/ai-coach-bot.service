@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Running Coach Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=skarambhe
+WorkingDirectory=/home/skarambhe/Projects/ai-running-coach
+EnvironmentFile=/home/skarambhe/Projects/ai-running-coach/.env
+ExecStart=/home/skarambhe/Projects/ai-running-coach/.venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

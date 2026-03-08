@@ -58,3 +58,10 @@ class GarminClient:
         except Exception:
             log.warning("Could not fetch HR zones for activity %s", activity_id)
             return []
+
+    def get_training_status(self) -> dict | None:
+        try:
+            return self.api.get_training_status(0)
+        except Exception:
+            log.warning("Could not fetch training status")
+            return None

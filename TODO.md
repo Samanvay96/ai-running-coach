@@ -29,19 +29,20 @@ or delete completed ones at the start of the next.
 
 ## Robustness
 
-- [ ] **Telegram send retry wrapper** — lift `_with_retry` from
-  `src/garmin_client.py:13` and wrap `_send_message` / `_send_document` in
-  `src/telegram_bot.py`. 3 attempts, exponential backoff. Cheap insurance
-  against transient Telegram 502s; failure alerts will surface it if it fires.
+- [x] ~~Telegram send retry wrapper~~ — done 2026-04-28: extracted
+  `with_retry` to `src/retry.py`; `send_coaching_message` retries 3x
+  and re-raises (poller alerts on final failure); `send_backup_to_telegram`
+  retries 3x and is best-effort (next backup will catch up).
 
 - [ ] **Heartbeat in daily alert** — if the poll timer ever stops firing
   (systemd quirk, reboot loop), today you'd notice only via missing analyses.
   In `src/alerts.py`: "if last activity poll >12 h ago, send alert."
 
-- [ ] **Smoke test for `analyze_run`** — no test suite in the repo yet. A
-  single test that mocks an Anthropic response with only a thinking block
-  would have caught the Apr 28 silent-failure bug before it shipped. Worth
-  one test per LLM call site (`analyze_run`, `weekly_summary`, `chat`).
+- [x] ~~Smoke test for `analyze_run`~~ — done 2026-04-28: `tests/test_coach.py`
+  with 7 tests covering `_extract_text` and `analyze_run` / `chat()`.
+  Specifically catches the Apr 28 silent-failure bug AND the budget_tokens
+  regression (asserts `max_tokens>=4096` and `thinking={"type":"adaptive"}`).
+  Run with `.venv/bin/python -m pytest tests/`.
 
 ## Cost / efficiency
 

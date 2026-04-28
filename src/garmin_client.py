@@ -1,32 +1,14 @@
 import json
 import logging
-import time
 from datetime import date
 from pathlib import Path
 
 from garminconnect import Garmin
 
 from .db import Database
+from .retry import with_retry as _with_retry
 
 log = logging.getLogger(__name__)
-
-
-def _with_retry(fn, *args, _label: str = "Garmin call", _attempts: int = 3, _backoff: float = 1.0, **kwargs):
-    """Run fn with retries + exponential backoff. Returns the call's result, or None on final failure.
-
-    Mirrors the existing fail-soft pattern in this module — log warnings, never raise.
-    """
-    for attempt in range(_attempts):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            if attempt < _attempts - 1:
-                wait = _backoff * (2 ** attempt)
-                log.warning("%s attempt %d/%d failed: %s (retry in %.1fs)", _label, attempt + 1, _attempts, e, wait)
-                time.sleep(wait)
-            else:
-                log.warning("%s failed after %d attempts: %s", _label, _attempts, e)
-    return None
 
 GARMIN_TOKEN_DIR = Path.home() / ".garminconnect"
 

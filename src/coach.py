@@ -234,6 +234,130 @@ def compute_mileage_delta(db: Database, today: date) -> dict:
     }
 
 
+def compute_adherence(plan: TrainingPlan, db: Database, today: date, lookback_runs: int = 10) -> dict:
+    """How many of the last `lookback_runs` prescribed runs did the runner actually complete?
+
+    Walks backwards from yesterday over plan-prescribed run days (Tue/Thu/Sat),
+    skipping rest/cross-training days. For each prescribed run date, looks for an
+    activity in the DB that day. Returns counts and missed dates.
+    """
+    completed = 0
+    missed_dates: list[str] = []
+    seen = 0
+    cursor = today - timedelta(days=1)
+    safety_limit = lookback_runs * 7  # avoid infinite walk if plan is empty
+    while seen < lookback_runs and safety_limit > 0:
+        prescribed = plan.get_prescribed_run(cursor)
+        if prescribed and prescribed.workout_type != "rest":
+            seen += 1
+            day_start = cursor.isoformat()
+            day_end = (cursor + timedelta(days=1)).isoformat()
+            acts = db.get_activities_for_range(day_start, day_end)
+            if acts:
+                completed += 1
+            else:
+                missed_dates.append(cursor.isoformat())
+        cursor -= timedelta(days=1)
+        safety_limit -= 1
+    return {"completed": completed, "total": seen, "missed_dates": missed_dates}
+
+
+def compute_easy_run_trend(plan: TrainingPlan, recent_runs: list[dict], n: int = 4) -> dict | None:
+    """Compare the most recent N easy-prescribed runs on the metrics that matter for fitness.
+
+    For each recent run, look up what was prescribed that day. If it was "easy", include it.
+    Trend signals (lower=fitter for HR-at-pace; lower=better aerobic for drift):
+      - avg pace
+      - avg HR
+      - avg HR/pace ratio (HR per m/s — proxy for "HR at this pace"; declining = fitter)
+      - avg HR drift %
+    Returns None if fewer than 2 easy runs are available (no trend without 2+).
+    """
+    easy_runs: list[dict] = []
+    for run in recent_runs:
+        st = run.get("start_time", "")
+        if not st:
+            continue
+        try:
+            d = date.fromisoformat(st[:10])
+        except ValueError:
+            continue
+        prescribed = plan.get_prescribed_run(d)
+        if prescribed and prescribed.workout_type == "easy":
+            easy_runs.append(run)
+        if len(easy_runs) >= n:
+            break
+
+    if len(easy_runs) < 2:
+        return None
+
+    # Order chronologically (oldest first)
+    easy_runs = sorted(easy_runs, key=lambda r: r.get("start_time", ""))
+
+    rows: list[dict] = []
+    for r in easy_runs:
+        avg_hr = r.get("avg_hr") or 0
+        # avg_pace_min_km is stored as "M:SS" string; convert to seconds for the ratio
+        pace_str = r.get("avg_pace_min_km") or ""
+        pace_secs: float | None = None
+        if isinstance(pace_str, str) and ":" in pace_str:
+            try:
+                m, s = pace_str.split(":")
+                pace_secs = int(m) * 60 + int(s)
+            except ValueError:
+                pace_secs = None
+        speed_mps = (1000 / pace_secs) if pace_secs else None
+        hr_per_speed = (avg_hr / speed_mps) if (avg_hr and speed_mps) else None
+        drift = compute_hr_drift(r.get("splits_json", ""))
+        rows.append({
+            "date": (r.get("start_time") or "")[:10],
+            "distance_km": r.get("distance_km"),
+            "pace": pace_str,
+            "hr": avg_hr or None,
+            "hr_per_speed": round(hr_per_speed, 2) if hr_per_speed else None,
+            "drift_pct": drift["decoupling_pct"] if drift else None,
+        })
+    return {"runs": rows}
+
+
+def compute_weekly_target(plan: TrainingPlan, db: Database, today: date) -> dict | None:
+    """Where the runner stands against this week's prescribed mileage target.
+
+    Returns actual km so far this week, target km, % progress, and days remaining
+    in the week. Returns None if today is outside the plan window.
+    """
+    week = plan.get_week_for_date(today)
+    if not week or not week.weekly_km_target:
+        return None
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
+    today_end = (today + timedelta(days=1)).isoformat()
+    actual = db.get_distance_sum(week_start, today_end)
+    pct = round(actual / week.weekly_km_target * 100, 1) if week.weekly_km_target > 0 else 0
+    days_remaining = 6 - today.weekday()
+    return {
+        "actual_km": round(actual, 1),
+        "target_km": round(week.weekly_km_target, 1),
+        "pct": pct,
+        "days_remaining": days_remaining,
+        "week_number": week.week_number,
+        "phase": week.phase,
+    }
+
+
+def format_upcoming_runs(plan: TrainingPlan, today: date, days: int = 3) -> str:
+    """Return the next `days` days of prescribed running, one line each. Skips rest days."""
+    lines: list[str] = []
+    for offset in range(days):
+        d = today + timedelta(days=offset)
+        prescribed = plan.get_prescribed_run(d)
+        label = d.strftime("%a %b %d")
+        if not prescribed or prescribed.workout_type == "rest":
+            lines.append(f"  {label}: rest / cross-training")
+        else:
+            lines.append(f"  {label}: {prescribed.description}")
+    return "\n".join(lines) if lines else "No upcoming prescription"
+
+
 def format_recovery(wellness: dict | None) -> str:
     if not wellness:
         return "No recent wellness data"
@@ -395,6 +519,44 @@ COACHING STYLE:
             else f"This week {delta['this_week_km']}km (no prior baseline)"
         )
 
+        # Plan adherence and weekly target progress
+        adherence = compute_adherence(self.plan, self.db, run_date)
+        if adherence["total"] > 0:
+            adherence_text = (
+                f"Completed {adherence['completed']}/{adherence['total']} of last "
+                f"{adherence['total']} prescribed runs"
+            )
+            if adherence["missed_dates"]:
+                adherence_text += f" (missed: {', '.join(adherence['missed_dates'][:3])})"
+        else:
+            adherence_text = "No prescribed runs in lookback window"
+
+        target = compute_weekly_target(self.plan, self.db, run_date)
+        weekly_target_text = (
+            f"Wk {target['week_number']} ({target['phase']}): "
+            f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%) "
+            f"with {target['days_remaining']} days remaining in week"
+            if target else "Outside training plan window"
+        )
+
+        # Cross-run trend on prescribed easy runs (last 4 like-for-like)
+        trend = compute_easy_run_trend(self.plan, recent, n=4)
+        if trend and len(trend["runs"]) >= 2:
+            trend_lines = []
+            for r in trend["runs"]:
+                trend_lines.append(
+                    f"  {r['date']}: {r['distance_km']}km @ {r['pace']}/km, "
+                    f"HR {r['hr']} ({r['hr_per_speed']} bpm·s/m), drift {r['drift_pct']}%"
+                )
+            trend_text = (
+                "Last easy runs (chronological, oldest first):\n"
+                + "\n".join(trend_lines)
+                + "\n  → declining HR-per-speed = aerobic fitness improving; "
+                "rising drift% = same-pace effort costing more"
+            )
+        else:
+            trend_text = "Not enough easy-run history yet for a trend (need 2+)"
+
         user_prompt = f"""Analyze this run and provide coaching feedback.
 
 TODAY'S RUN ({weekday_name}):
@@ -417,6 +579,11 @@ RUN QUALITY:
 LOAD CONTEXT:
 - {acr_text}
 - {delta_text}
+- Adherence: {adherence_text}
+- Weekly target: {weekly_target_text}
+
+EASY-RUN TREND:
+{trend_text}
 
 RECOVERY & READINESS (last available night):
 {recovery_text}
@@ -437,11 +604,13 @@ Provide:
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
 3. HR/effort analysis — explicitly use HR drift % and Z2 time-in-zone (call out if easy ran too hard)
-4. Recovery & load read — flag if ACR >1.5, mileage jump >10%, or HRV/sleep poor
-5. Cadence & elevation note (if relevant)
-6. One thing done well
-7. One thing to watch or improve
-8. Brief look-ahead to next scheduled run"""
+4. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
+5. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
+6. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
+7. Cadence & elevation note (if relevant)
+8. One thing done well
+9. One thing to watch or improve
+10. Brief look-ahead to next scheduled run"""
 
         response = self.client.messages.create(
             model=MODEL,
@@ -600,12 +769,62 @@ Keep it Telegram-friendly (under 3000 chars)."""
         """Handle interactive conversation via Telegram."""
         history = self.db.get_recent_conversations(limit=10)
         recent_runs = self.db.get_recent_activities(limit=5)
+        today = date.today()
 
         messages = [{"role": h["role"], "content": h["content"]} for h in history]
 
-        context_prefix = ""
+        # Build a rich context prefix so chat() reasons against the same data
+        # analyze_run sees: latest analysis, ACR, weekly target, adherence,
+        # wellness, and upcoming prescription.
+        context_lines: list[str] = []
         if recent_runs:
-            context_prefix = f"[Recent runs for context:\n{format_recent_activities(recent_runs)}]\n\n"
+            context_lines.append("Recent runs:")
+            context_lines.append(format_recent_activities(recent_runs))
+
+            latest = recent_runs[0]
+            latest_analysis = latest.get("coaching_response")
+            if latest_analysis:
+                snippet = latest_analysis if len(latest_analysis) <= 1500 else latest_analysis[:1500] + "…"
+                context_lines.append(
+                    f"\nLatest run analysis ({(latest.get('start_time') or '?')[:10]}):\n{snippet}"
+                )
+
+        acr = compute_acr(self.db, today)
+        if acr and acr.get("ratio") is not None:
+            context_lines.append(
+                f"\nCurrent ACR: {acr['ratio']} (acute 7d={acr['acute_7d']}, chronic 28d={acr['chronic_28d']})"
+            )
+
+        target = compute_weekly_target(self.plan, self.db, today)
+        if target:
+            context_lines.append(
+                f"This week: {target['actual_km']}/{target['target_km']} km "
+                f"({target['pct']}%, {target['days_remaining']} days left)"
+            )
+
+        adherence = compute_adherence(self.plan, self.db, today)
+        if adherence["total"] > 0:
+            context_lines.append(
+                f"Adherence: {adherence['completed']}/{adherence['total']} of last "
+                f"{adherence['total']} prescribed runs completed"
+            )
+
+        wellness = self.db.get_latest_wellness()
+        recovery = format_recovery(wellness)
+        if recovery and recovery != "No recent wellness data":
+            context_lines.append(f"Latest wellness: {recovery}")
+
+        upcoming = format_upcoming_runs(self.plan, today, days=3)
+        if upcoming:
+            context_lines.append(f"\nUpcoming 3 days:\n{upcoming}")
+
+        context_prefix = (
+            "[Context for this conversation — use it implicitly, don't restate "
+            "unless the user asks:\n"
+            + "\n".join(context_lines)
+            + "\n]\n\n"
+            if context_lines else ""
+        )
 
         messages.append({"role": "user", "content": context_prefix + user_message})
 

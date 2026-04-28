@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from datetime import date
 from pathlib import Path
 
 from garminconnect import Garmin
@@ -77,7 +78,10 @@ class GarminClient:
         ) or []
 
     def get_training_status(self) -> dict | None:
-        return _with_retry(self.api.get_training_status, 0, _label="training status")
+        return _with_retry(
+            self.api.get_training_status, date.today().isoformat(),
+            _label="training status",
+        )
 
     def get_sleep(self, target_date) -> dict | None:
         return _with_retry(

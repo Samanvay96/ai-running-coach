@@ -15,6 +15,7 @@ A personal AI running coach that monitors your Garmin activities and delivers co
   - `/today` — what's prescribed today
   - `/week` — this week's training overview
   - `/status` — recent training summary and progress check
+  - `/lastrun` — re-send the most recent run analysis (handy if the original delivery dropped, or you want to re-read it)
   - `/backup` — grab a fresh DB backup as a Telegram document attachment
 
 ## 📊 Metrics it tracks

@@ -73,7 +73,9 @@ class CoachBot:
             "Commands:\n"
             "/today - What's prescribed today\n"
             "/week - This week's plan\n"
-            "/status - Recent training summary\n\n"
+            "/status - Recent training summary\n"
+            "/lastrun - Re-send the most recent run analysis\n"
+            "/backup - Grab a fresh DB backup\n\n"
             "Or just send me a message to chat about your training!"
         )
 
@@ -153,6 +155,26 @@ class CoachBot:
         )
         await update.message.reply_text(countdown_text + response)
 
+    async def cmd_lastrun(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        runs = self.db.get_recent_activities(limit=1)
+        if not runs:
+            await update.message.reply_text("No runs in the database yet.")
+            return
+        run = runs[0]
+        text = run.get("coaching_response")
+        if not text:
+            await update.message.reply_text(
+                f"Most recent run ({run.get('start_time', '?')[:10]}, "
+                f"{run.get('distance_km', 0):.1f}km) has no saved analysis — "
+                f"the poller may not have processed it yet."
+            )
+            return
+        if len(text) > 4096:
+            text = text[:4093] + "..."
+        await update.message.reply_text(text)
+
     async def cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
@@ -184,6 +206,7 @@ class CoachBot:
         app.add_handler(CommandHandler("today", self.cmd_today))
         app.add_handler(CommandHandler("week", self.cmd_week))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("lastrun", self.cmd_lastrun))
         app.add_handler(CommandHandler("backup", self.cmd_backup))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 

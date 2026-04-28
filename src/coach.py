@@ -10,7 +10,7 @@ from .training_plan import TrainingPlan
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-4-6"
 
 
 def format_pace(speed_mps: float) -> str:
@@ -425,10 +425,12 @@ Provide:
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=1024,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        return next(b.text for b in response.content if b.type == "text")
 
     def _race_countdown(self) -> dict:
         today = date.today()
@@ -554,10 +556,12 @@ Keep it Telegram-friendly (under 3000 chars)."""
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=1500,
+            thinking={"type": "adaptive"},
+            output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return response.content[0].text
+        return next(b.text for b in response.content if b.type == "text")
 
     def chat(self, user_message: str) -> str:
         """Handle interactive conversation via Telegram."""

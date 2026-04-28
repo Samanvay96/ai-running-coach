@@ -13,6 +13,27 @@ log = logging.getLogger(__name__)
 MODEL = "claude-sonnet-4-6"
 
 
+def _extract_text(response) -> str:
+    """Return the first text block's content. Raises with diagnostics if none.
+
+    With adaptive thinking, the model may emit only thinking blocks if
+    max_tokens is exhausted before it gets to the text response — in which
+    case `next(...)` would raise StopIteration with an empty str(). This
+    helper surfaces stop_reason and block types so failures are debuggable.
+    """
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    block_types = [getattr(b, "type", "?") for b in response.content]
+    stop_reason = getattr(response, "stop_reason", "?")
+    usage = getattr(response, "usage", "?")
+    raise RuntimeError(
+        f"No text block in Anthropic response (stop_reason={stop_reason}, "
+        f"blocks={block_types}, usage={usage}). "
+        f"Likely cause: max_tokens hit during thinking — increase max_tokens."
+    )
+
+
 def format_pace(speed_mps: float) -> str:
     """Convert m/s to min:sec/km."""
     if not speed_mps or speed_mps <= 0:
@@ -424,13 +445,13 @@ Provide:
 
         response = self.client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=4096,
             thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return next(b.text for b in response.content if b.type == "text")
+        return _extract_text(response)
 
     def _race_countdown(self) -> dict:
         today = date.today()
@@ -555,13 +576,13 @@ Keep it Telegram-friendly (under 3000 chars)."""
 
         response = self.client.messages.create(
             model=MODEL,
-            max_tokens=1500,
+            max_tokens=4096,
             thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
         )
-        return next(b.text for b in response.content if b.type == "text")
+        return _extract_text(response)
 
     def chat(self, user_message: str) -> str:
         """Handle interactive conversation via Telegram."""
@@ -580,11 +601,11 @@ Keep it Telegram-friendly (under 3000 chars)."""
 
         response = self.client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             system=self._build_system_prompt(),
             messages=messages,
         )
 
-        reply = response.content[0].text
+        reply = _extract_text(response)
         self.db.save_conversation("assistant", reply)
         return reply

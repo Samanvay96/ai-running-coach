@@ -6,22 +6,26 @@ or delete completed ones at the start of the next.
 
 ## Coach quality
 
-- [ ] **Rich context in `chat()`** — `Coach.chat()` (`src/coach.py:566-590`) only
-  passes `format_recent_activities` (last 5 runs as date/distance/duration/pace/HR).
-  Including the most recent saved `coaching_response`, current ACR, latest
-  wellness row, and the next ~3 days of prescription would 10× the chat utility.
-  Biggest UX gap right now — when you ask "where's my analysis?" the response
-  is thin because the path can't see the rich data the poller already saved.
-  ~30 lines of plumbing in `chat()`.
+- [x] ~~Rich context in `chat()`~~ — done 2026-04-28: latest analysis,
+  ACR, weekly target, adherence, wellness, and upcoming 3 days now in chat.
+- [x] ~~Plan adherence tracking~~ — done 2026-04-28: `compute_adherence` in
+  `coach.py`, surfaced in `/status` and fed into `analyze_run`.
+- [x] ~~Race-aware milestones~~ — done 2026-04-28: `compute_weekly_target`
+  surfaces actual-vs-prescribed km with days remaining; in `/status`,
+  `analyze_run`, and chat.
+- [x] ~~Cross-run trend awareness~~ — done 2026-04-28: `compute_easy_run_trend`
+  shows last 4 easy runs with HR-per-speed and drift% in `analyze_run`.
 
-- [ ] **Plan adherence tracking** — surface "completed N of last 10 prescribed
-  runs" in `/status`, and feed it into `analyze_run` so the coach knows whether
-  you're in a fragile restart vs a steady block. Particularly relevant during
-  the current restart phase. Helper would live in `src/db.py` or `src/coach.py`.
+- [ ] **Pull running power / power zones** *(if watch supports)* — power is a
+  more stable effort signal than HR for short or hot runs. Currently we don't
+  read it. One Garmin field at extraction time + one prompt line.
 
-- [ ] **Race-aware milestones in the prompt** — countdown is shown but the
-  coach doesn't reason against weekly targets ("by week 20 you should be hitting
-  X km/week"). Worth a prompt iteration once the foundation work is done.
+- [ ] **Track perceived effort** — bot prompts "how hard did that feel? 1-10"
+  after each run; stored on the activity. Subjective vs objective HR/pace
+  divergence is a strong injury/illness predictor.
+
+- [ ] **Weekly mood/energy check-in** — Sunday Telegram nudge: "1-10 on legs,
+  1-10 on motivation." Catches mental burnout that wellness data misses.
 
 ## Robustness
 

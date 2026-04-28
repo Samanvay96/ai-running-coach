@@ -8,10 +8,13 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 - 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, and splits
 - 💬 **Sends coaching feedback** to Telegram automatically after each detected run
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
+- 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt; nudges you *before* you overdo it
+- ☁️ **Auto off-Pi backups** — every new run triggers a fresh DB backup that's sent to Telegram, so your training history survives an SD card failure
 - ⌨️ **Telegram commands**:
   - `/today` — what's prescribed today
   - `/week` — this week's training overview
   - `/status` — recent training summary and progress check
+  - `/backup` — grab a fresh DB backup as a Telegram document attachment
 
 ## 📊 Metrics it tracks
 
@@ -36,16 +39,24 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 
 ## 🏗️ Architecture
 
-Two background services on a Raspberry Pi:
+Four scheduled jobs + one always-on bot, all running under systemd on a Raspberry Pi:
 
 ```
 Garmin Connect ──(every 2h)──> Poller ──(new run?)──> LLM Analysis ──> Telegram
                                   │                        ↑
                                   ├── SQLite ←── Training Plan (Excel)
                                   └── Daily wellness (sleep / HRV / RHR)
+                                          ↓
+                                          ├──(after each run)── Backup → Telegram
+                                          ↓
+       (daily 02:00) ─────── Backup timer ──→ data/backups/coach-YYYYMMDD.db.gz
+       (daily 08:00) ─────── Alerts timer ──→ Combined wellness nudge → Telegram
 
-Telegram user ──(message)──> Bot ──> LLM Chat ──> Reply
+Telegram user ──(message / /command)──> Bot ──> LLM Chat ──> Reply
 ```
+
+All Garmin API calls have automatic retry-with-backoff (3 attempts), so transient
+failures don't leave gaps in your wellness or load history.
 
 ## 📋 Prerequisites
 
@@ -109,11 +120,25 @@ This creates a virtual environment, installs dependencies, and installs systemd 
 ### 5️⃣ Start the services
 
 ```bash
-sudo systemctl start ai-coach-bot          # 🤖 Telegram bot
-sudo systemctl start ai-coach-poll.timer   # 📡 Garmin poller
+sudo systemctl start ai-coach-bot              # 🤖 Telegram bot (always-on)
+sudo systemctl start ai-coach-poll.timer       # 📡 Garmin poller (every 2h)
+sudo systemctl enable --now ai-coach-backup.timer ai-coach-alerts.timer
+                                                # 💾 Daily 02:00 backup + 08:00 wellness alerts
 ```
 
-Both services auto-start on boot.
+All services auto-start on boot.
+
+### 6️⃣ (Optional) Backfill historical wellness data
+
+If you've been wearing your watch overnight before installing the bot, pull
+the last N days of sleep / HRV / RHR from Garmin Connect so the alert checks
+have a full baseline from day one:
+
+```bash
+.venv/bin/python -m src.backfill_wellness 60   # backfill 60 days (default 30)
+```
+
+Idempotent — safe to re-run.
 
 ## 🛠️ Usage
 
@@ -122,6 +147,9 @@ Both services auto-start on boot.
 ```bash
 sudo systemctl status ai-coach-bot
 sudo systemctl status ai-coach-poll.timer
+sudo systemctl status ai-coach-backup.timer
+sudo systemctl status ai-coach-alerts.timer
+systemctl list-timers ai-coach-*.timer       # see all next-fire times at a glance
 ```
 
 ### 📜 View logs
@@ -129,12 +157,17 @@ sudo systemctl status ai-coach-poll.timer
 ```bash
 journalctl -u ai-coach-bot -f         # Bot logs
 journalctl -u ai-coach-poll -f        # Poller logs
+journalctl -u ai-coach-backup -f      # Backup logs
+journalctl -u ai-coach-alerts -f      # Alert logs
 ```
 
-### ⚡ Run the poller manually
+### ⚡ Run any job manually
 
 ```bash
-.venv/bin/python -m src.poller
+.venv/bin/python -m src.poller                # Poll now
+.venv/bin/python -m src.backup                # Run a backup now
+.venv/bin/python -m src.alerts                # Run wellness check now
+.venv/bin/python -m src.backfill_wellness 30  # Backfill 30 days of overnight data
 ```
 
 ### ⏱️ Adjust polling interval
@@ -147,27 +180,51 @@ sudo systemctl daemon-reload
 sudo systemctl restart ai-coach-poll.timer
 ```
 
+## 🚨 What the alerts watch for
+
+The daily 08:00 wellness check sends a single combined Telegram nudge if any of
+these signals fire (each has a 3-day cooldown so multi-day overreach doesn't spam
+you):
+
+| Check | Threshold | Why |
+|---|---|---|
+| ACR | acute:chronic load ratio ≥ 1.5 | Sweet spot is 0.8–1.3; >1.5 is the standard injury-risk window |
+| RHR creep | last 3 nights avg ≥ prior 11-night baseline + 5 bpm | Classic overreach / illness-brewing signal |
+| HRV drop | 3 nights all `UNBALANCED` OR ≥15% below 7-day avg | Confirms autonomic stress |
+| Sleep debt | 3-night avg < 6.5h | Below recovery threshold; hard runs will compound damage |
+
+## 💾 Backup behaviour
+
+- 🕑 **Daily 02:00** — a full snapshot of `data/coach.db` lands in `data/backups/coach-YYYYMMDD.db.gz` (rolling 14-day retention).
+- 🏃 **After each new run** — same snapshot is also uploaded to Telegram as a document attachment, giving you an off-Pi copy automatically.
+- 🪛 **`/backup` command** — manually triggers the same flow on demand (useful before travel or after data corrections).
+
+Snapshots use SQLite's `.backup()` API, so they're atomic even while the bot is writing.
+
 ## 📁 Project Structure
 
 ```
-├── 🔐 .env.example          # Template for credentials
-├── 📦 requirements.txt      # Python dependencies
-├── 🔧 setup.sh              # One-time setup script
+├── 🔐 .env.example                # Template for credentials
+├── 📦 requirements.txt            # Python dependencies
+├── 🔧 setup.sh                    # One-time setup script
 ├── 📂 src/
-│   ├── ⚙️  config.py         # Environment config and constants
-│   ├── 💾 db.py             # SQLite database layer
-│   ├── 📋 training_plan.py  # Excel training plan parser
-│   ├── ⌚ garmin_client.py  # Garmin Connect API wrapper
-│   ├── 🧠 coach.py          # LLM coaching engine
-│   ├── 💬 telegram_bot.py   # Telegram bot handlers
-│   ├── 🔄 poller.py         # New run detection and analysis
-│   └── 🚪 main.py           # Bot entry point
-└── 🛠️  systemd/              # systemd service and timer units
+│   ├── ⚙️  config.py               # Environment config and constants
+│   ├── 💾 db.py                   # SQLite database layer
+│   ├── 📋 training_plan.py        # Excel training plan parser (auto-reload on edit)
+│   ├── ⌚ garmin_client.py        # Garmin Connect API wrapper (with retries)
+│   ├── 🧠 coach.py                # LLM coaching engine + metric helpers
+│   ├── 💬 telegram_bot.py         # Telegram bot handlers + commands
+│   ├── 🔄 poller.py               # New run detection and analysis
+│   ├── 💾 backup.py               # SQLite atomic snapshot + rotation
+│   ├── 🚨 alerts.py               # Daily proactive overload checks
+│   ├── 🌙 backfill_wellness.py    # One-shot wellness history loader
+│   └── 🚪 main.py                 # Bot entry point
+└── 🛠️  systemd/                    # systemd service + timer units
 ```
 
 ## 🧪 Tech Stack
 
 - 🐍 **Python 3** with `garminconnect`, `python-telegram-bot`, `anthropic`, `openpyxl`
-- 💾 **SQLite** for activity history, daily wellness, session tokens, and conversation state
-- ⚙️ **systemd** for process management on Raspberry Pi
-- 🤖 **Anthropic Claude (Sonnet 4)** for run analysis and chat
+- 💾 **SQLite** for activity history, daily wellness, session tokens, conversation state, and alert dedup
+- ⚙️ **systemd** for process management on Raspberry Pi (4 timers + 1 always-on service)
+- 🤖 **Anthropic Claude (Sonnet 4.6)** with adaptive thinking for run analysis and weekly summaries

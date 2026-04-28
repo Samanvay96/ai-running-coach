@@ -17,7 +17,8 @@ from src.db import Database
 from src.garmin_client import GarminClient
 from src.training_plan import TrainingPlan
 from src.coach import Coach, format_pace
-from src.telegram_bot import send_coaching_message, send_error_alert
+from src.telegram_bot import send_coaching_message, send_error_alert, send_backup_to_telegram
+from src.backup import run_backup
 
 
 def poll():
@@ -116,6 +117,18 @@ def poll():
             new_count += 1
         except Exception as e:
             log.error("Failed to analyze/send activity %s: %s", activity_id, e)
+
+        # Off-Pi backup after each new activity. Best-effort — never block the
+        # poll path on a backup failure.
+        try:
+            backup_path = run_backup()
+            send_backup_to_telegram(
+                backup_path,
+                caption=f"DB backup after activity {activity_id}",
+            )
+            log.info("Backup sent to Telegram: %s", backup_path.name)
+        except Exception as e:
+            log.warning("Post-run backup failed: %s", e)
             send_error_alert(f"Failed to analyze activity {activity_id}: {e}")
 
     if new_count == 0:

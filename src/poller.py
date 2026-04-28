@@ -10,6 +10,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 from src.config import GARMIN_EMAIL, GARMIN_PASSWORD, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH
@@ -43,6 +45,14 @@ def poll():
         if db.activity_exists(activity_id):
             continue
 
+        distance_km = (activity.get("distance") or 0) / 1000
+        if distance_km < 1.0:
+            log.info(
+                "Skipping short activity %s (%.2fkm) — likely a watch test or warm-up",
+                activity_id, distance_km,
+            )
+            continue
+
         log.info("New activity found: %s (ID: %s)", activity.get("activityName"), activity_id)
 
         # Fetch splits + HR zones
@@ -50,7 +60,6 @@ def poll():
         hr_zones = garmin.get_activity_hr_zones(activity_id)
 
         # Extract and store key metrics
-        distance_km = (activity.get("distance") or 0) / 1000
         duration_seconds = activity.get("duration") or 0
         avg_speed = activity.get("averageSpeed") or 0
         avg_pace = format_pace(avg_speed)

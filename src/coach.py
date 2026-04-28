@@ -446,9 +446,15 @@ Provide:
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            thinking={"type": "adaptive", "budget_tokens": 2048},
+            thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
-            system=self._build_system_prompt(),
+            system=[
+                {
+                    "type": "text",
+                    "text": self._build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": user_prompt}],
         )
         return _extract_text(response)
@@ -577,9 +583,15 @@ Keep it Telegram-friendly (under 3000 chars)."""
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            thinking={"type": "adaptive", "budget_tokens": 2048},
+            thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
-            system=self._build_system_prompt(),
+            system=[
+                {
+                    "type": "text",
+                    "text": self._build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[{"role": "user", "content": user_prompt}],
         )
         return _extract_text(response)
@@ -602,7 +614,13 @@ Keep it Telegram-friendly (under 3000 chars)."""
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=2048,
-            system=self._build_system_prompt(),
+            system=[
+                {
+                    "type": "text",
+                    "text": self._build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=messages,
         )
 

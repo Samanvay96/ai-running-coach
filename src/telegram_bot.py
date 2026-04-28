@@ -48,7 +48,10 @@ class CoachBot:
         self.coach = Coach(ANTHROPIC_API_KEY, self.plan, self.db)
 
     def _is_authorized(self, update: Update) -> bool:
-        return str(update.effective_chat.id) == TELEGRAM_CHAT_ID
+        if str(update.effective_chat.id) != TELEGRAM_CHAT_ID:
+            return False
+        self.plan.reload_if_changed()
+        return True
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
@@ -90,7 +93,7 @@ class CoachBot:
                 msg = f"Week {week.week_number} ({week.phase}) - {today.strftime('%A, %b %d')}\n\n"
                 msg += f"No run today — rest up!\n\n"
                 if today.weekday() == 0:
-                    msg += f"Cross-training: {week.monday}\n\n"
+                    msg += f"Cross-training: {week.monday.description}\n\n"
                 if next_runs:
                     msg += "Coming up:\n" + "\n".join(next_runs)
                 else:

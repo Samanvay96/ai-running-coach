@@ -22,3 +22,8 @@ PLAN_START_DATE = date(2026, 3, 2)  # Monday of week 1
 RACE_DATE = date(2026, 10, 10)
 TARGET_FINISH = "3:57:57"
 TARGET_PACE_KM = "5:40"
+
+# Runner physiology — set RUNNER_AGE in .env. Used to derive MAX_HR via 220-age.
+# Formula is approximate (±10 bpm typical); good enough for directional Z2 % math.
+AGE = int(os.environ.get("RUNNER_AGE", "30"))
+MAX_HR = 220 - AGE

@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS weekly_summaries (
     sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
     summary_text TEXT
 );
+
+CREATE TABLE IF NOT EXISTS daily_wellness (
+    date TEXT PRIMARY KEY,
+    sleep_seconds INTEGER,
+    sleep_score INTEGER,
+    hrv_last_night REAL,
+    hrv_7d_avg REAL,
+    hrv_status TEXT,
+    rhr INTEGER,
+    raw_json TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 MIGRATIONS = [
@@ -65,6 +77,10 @@ MIGRATIONS = [
     "ALTER TABLE activities ADD COLUMN elevation_gain REAL",
     "ALTER TABLE activities ADD COLUMN elevation_loss REAL",
     "ALTER TABLE activities ADD COLUMN anaerobic_te REAL",
+    "ALTER TABLE activities ADD COLUMN training_load REAL",
+    "ALTER TABLE activities ADD COLUMN hr_zones_json TEXT",
+    "ALTER TABLE training_status ADD COLUMN lt_pace_min_km REAL",
+    "ALTER TABLE training_status ADD COLUMN lt_hr INTEGER",
 ]
 
 
@@ -97,18 +113,20 @@ class Database:
                       avg_cadence: float | None = None,
                       elevation_gain: float | None = None,
                       elevation_loss: float | None = None,
-                      anaerobic_te: float | None = None) -> None:
+                      anaerobic_te: float | None = None,
+                      training_load: float | None = None,
+                      hr_zones_json: str | None = None) -> None:
         self.conn.execute(
             """INSERT OR IGNORE INTO activities
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace_min_km, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
-             raw_json, splits_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             raw_json, splits_json, training_load, hr_zones_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
-             raw_json, splits_json)
+             raw_json, splits_json, training_load, hr_zones_json)
         )
         self.conn.commit()
 
@@ -167,12 +185,16 @@ class Database:
 
     def save_training_status(self, snapshot_date: str, training_load_7d: float | None,
                              recovery_time_hours: int | None, vo2max: float | None,
-                             training_status_label: str | None, raw_json: str) -> None:
+                             training_status_label: str | None, raw_json: str,
+                             lt_pace_min_km: float | None = None,
+                             lt_hr: int | None = None) -> None:
         self.conn.execute(
             """INSERT INTO training_status
-            (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json)
+            (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json,
+             lt_pace_min_km, lt_hr)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json,
+             lt_pace_min_km, lt_hr)
         )
         self.conn.commit()
 
@@ -187,6 +209,52 @@ class Database:
             "SELECT 1 FROM weekly_summaries WHERE week_start = ?", (week_start,)
         ).fetchone()
         return row is not None
+
+    def save_daily_wellness(self, target_date: str, sleep_seconds: int | None,
+                            sleep_score: int | None, hrv_last_night: float | None,
+                            hrv_7d_avg: float | None, hrv_status: str | None,
+                            rhr: int | None, raw_json: str) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO daily_wellness
+            (date, sleep_seconds, sleep_score, hrv_last_night, hrv_7d_avg, hrv_status, rhr, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (target_date, sleep_seconds, sleep_score, hrv_last_night, hrv_7d_avg, hrv_status, rhr, raw_json)
+        )
+        self.conn.commit()
+
+    def get_latest_wellness(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM daily_wellness ORDER BY date DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_wellness_for_range(self, start_date: str, end_date: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM daily_wellness WHERE date >= ? AND date <= ? ORDER BY date",
+            (start_date, end_date)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_training_load_sum(self, start_date: str, end_date: str) -> float:
+        """Sum activities.training_load between two ISO dates (inclusive on both ends).
+        Used for acute:chronic load ratio."""
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(training_load), 0) AS total
+               FROM activities
+               WHERE training_load IS NOT NULL
+                 AND start_time >= ? AND start_time < ?""",
+            (start_date, end_date)
+        ).fetchone()
+        return float(row["total"] or 0)
+
+    def get_distance_sum(self, start_date: str, end_date: str) -> float:
+        row = self.conn.execute(
+            """SELECT COALESCE(SUM(distance_km), 0) AS total
+               FROM activities
+               WHERE start_time >= ? AND start_time < ?""",
+            (start_date, end_date)
+        ).fetchone()
+        return float(row["total"] or 0)
 
     def save_weekly_summary(self, week_number: int, week_start: str, week_end: str,
                             summary_text: str) -> None:

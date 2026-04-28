@@ -116,7 +116,8 @@ def poll():
             log.info("Coaching sent for activity %s", activity_id)
             new_count += 1
         except Exception as e:
-            log.error("Failed to analyze/send activity %s: %s", activity_id, e)
+            log.exception("Failed to analyze/send activity %s", activity_id)
+            send_error_alert(f"Analysis send failed for activity {activity_id}: {e!r}")
 
         # Off-Pi backup after each new activity. Best-effort — never block the
         # poll path on a backup failure.

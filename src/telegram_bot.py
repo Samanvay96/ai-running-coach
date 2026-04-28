@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import date
+from pathlib import Path
 
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -37,6 +38,17 @@ def send_error_alert(error: str):
         asyncio.run(_send_message(msg))
     except Exception:
         pass  # Don't crash if we can't send the alert
+
+
+async def _send_document(path: Path, caption: str = ""):
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    with path.open("rb") as f:
+        await bot.send_document(chat_id=TELEGRAM_CHAT_ID, document=f, filename=path.name, caption=caption)
+
+
+def send_backup_to_telegram(path: Path, caption: str = "") -> None:
+    """Synchronous wrapper to send a file (the DB backup) as a Telegram document."""
+    asyncio.run(_send_document(path, caption))
 
 
 # --- Interactive bot ---
@@ -141,6 +153,23 @@ class CoachBot:
         )
         await update.message.reply_text(countdown_text + response)
 
+    async def cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        from .backup import run_backup
+        try:
+            path = run_backup()
+        except Exception as e:
+            log.exception("Backup failed")
+            await update.message.reply_text(f"Backup failed: {e}")
+            return
+        with path.open("rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=path.name,
+                caption=f"DB backup ({path.stat().st_size} bytes, gzipped)",
+            )
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
@@ -155,6 +184,7 @@ class CoachBot:
         app.add_handler(CommandHandler("today", self.cmd_today))
         app.add_handler(CommandHandler("week", self.cmd_week))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("backup", self.cmd_backup))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         log.info("Telegram bot starting...")

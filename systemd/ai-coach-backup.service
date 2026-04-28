@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Running Coach DB Backup
+After=network.target
+
+[Service]
+Type=oneshot
+User=skarambhe
+WorkingDirectory=/home/skarambhe/Projects/ai-running-coach
+EnvironmentFile=/home/skarambhe/Projects/ai-running-coach/.env
+ExecStart=/home/skarambhe/Projects/ai-running-coach/.venv/bin/python -m src.backup

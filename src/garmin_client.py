@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from pathlib import Path
 
 from garminconnect import Garmin
@@ -7,6 +8,24 @@ from garminconnect import Garmin
 from .db import Database
 
 log = logging.getLogger(__name__)
+
+
+def _with_retry(fn, *args, _label: str = "Garmin call", _attempts: int = 3, _backoff: float = 1.0, **kwargs):
+    """Run fn with retries + exponential backoff. Returns the call's result, or None on final failure.
+
+    Mirrors the existing fail-soft pattern in this module — log warnings, never raise.
+    """
+    for attempt in range(_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if attempt < _attempts - 1:
+                wait = _backoff * (2 ** attempt)
+                log.warning("%s attempt %d/%d failed: %s (retry in %.1fs)", _label, attempt + 1, _attempts, e, wait)
+                time.sleep(wait)
+            else:
+                log.warning("%s failed after %d attempts: %s", _label, _attempts, e)
+    return None
 
 GARMIN_TOKEN_DIR = Path.home() / ".garminconnect"
 
@@ -46,50 +65,37 @@ class GarminClient:
         ]
 
     def get_activity_splits(self, activity_id: int) -> list[dict]:
-        try:
-            return self.api.get_activity_splits(activity_id)
-        except Exception:
-            log.warning("Could not fetch splits for activity %s", activity_id)
-            return []
+        return _with_retry(
+            self.api.get_activity_splits, activity_id,
+            _label=f"splits for activity {activity_id}",
+        ) or []
 
     def get_activity_hr_zones(self, activity_id: int) -> list[dict]:
-        try:
-            return self.api.get_activity_hr_in_timezones(activity_id)
-        except Exception:
-            log.warning("Could not fetch HR zones for activity %s", activity_id)
-            return []
+        return _with_retry(
+            self.api.get_activity_hr_in_timezones, activity_id,
+            _label=f"HR zones for activity {activity_id}",
+        ) or []
 
     def get_training_status(self) -> dict | None:
-        try:
-            return self.api.get_training_status(0)
-        except Exception:
-            log.warning("Could not fetch training status")
-            return None
+        return _with_retry(self.api.get_training_status, 0, _label="training status")
 
     def get_sleep(self, target_date) -> dict | None:
-        try:
-            return self.api.get_sleep_data(target_date.isoformat())
-        except Exception as e:
-            log.warning("Could not fetch sleep data for %s: %s", target_date, e)
-            return None
+        return _with_retry(
+            self.api.get_sleep_data, target_date.isoformat(),
+            _label=f"sleep data for {target_date}",
+        )
 
     def get_hrv(self, target_date) -> dict | None:
-        try:
-            return self.api.get_hrv_data(target_date.isoformat())
-        except Exception as e:
-            log.warning("Could not fetch HRV data for %s: %s", target_date, e)
-            return None
+        return _with_retry(
+            self.api.get_hrv_data, target_date.isoformat(),
+            _label=f"HRV data for {target_date}",
+        )
 
     def get_rhr(self, target_date) -> dict | None:
-        try:
-            return self.api.get_rhr_day(target_date.isoformat())
-        except Exception as e:
-            log.warning("Could not fetch RHR for %s: %s", target_date, e)
-            return None
+        return _with_retry(
+            self.api.get_rhr_day, target_date.isoformat(),
+            _label=f"RHR for {target_date}",
+        )
 
     def get_lactate_threshold(self) -> dict | None:
-        try:
-            return self.api.get_lactate_threshold()
-        except Exception as e:
-            log.warning("Could not fetch lactate threshold: %s", e)
-            return None
+        return _with_retry(self.api.get_lactate_threshold, _label="lactate threshold")

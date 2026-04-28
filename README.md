@@ -9,6 +9,7 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 - 💬 **Sends coaching feedback** to Telegram automatically after each detected run
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
 - 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt; nudges you *before* you overdo it
+- ⚠️ **Failure alerts** — if a run analysis fails to generate or deliver, the poller surfaces the exception (with type and `stop_reason`) to Telegram so you notice in seconds, not the next time you check the journal
 - ☁️ **Auto off-Pi backups** — every new run triggers a fresh DB backup that's sent to Telegram, so your training history survives an SD card failure
 - ⌨️ **Telegram commands**:
   - `/today` — what's prescribed today
@@ -168,6 +169,8 @@ journalctl -u ai-coach-alerts -f      # Alert logs
 .venv/bin/python -m src.backup                # Run a backup now
 .venv/bin/python -m src.alerts                # Run wellness check now
 .venv/bin/python -m src.backfill_wellness 30  # Backfill 30 days of overnight data
+.venv/bin/python -m scripts.replay_analyze <activity_id> --deliver
+                                              # Re-run analysis for a stored activity, save, and send to Telegram
 ```
 
 ### ⏱️ Adjust polling interval
@@ -219,6 +222,7 @@ Snapshots use SQLite's `.backup()` API, so they're atomic even while the bot is 
 │   ├── 🚨 alerts.py               # Daily proactive overload checks
 │   ├── 🌙 backfill_wellness.py    # One-shot wellness history loader
 │   └── 🚪 main.py                 # Bot entry point
+├── 🧰 scripts/                    # One-off diagnostics (replay an activity's analysis, etc.)
 └── 🛠️  systemd/                    # systemd service + timer units
 ```
 

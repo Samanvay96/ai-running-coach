@@ -65,3 +65,31 @@ class GarminClient:
         except Exception:
             log.warning("Could not fetch training status")
             return None
+
+    def get_sleep(self, target_date) -> dict | None:
+        try:
+            return self.api.get_sleep_data(target_date.isoformat())
+        except Exception as e:
+            log.warning("Could not fetch sleep data for %s: %s", target_date, e)
+            return None
+
+    def get_hrv(self, target_date) -> dict | None:
+        try:
+            return self.api.get_hrv_data(target_date.isoformat())
+        except Exception as e:
+            log.warning("Could not fetch HRV data for %s: %s", target_date, e)
+            return None
+
+    def get_rhr(self, target_date) -> dict | None:
+        try:
+            return self.api.get_rhr_day(target_date.isoformat())
+        except Exception as e:
+            log.warning("Could not fetch RHR for %s: %s", target_date, e)
+            return None
+
+    def get_lactate_threshold(self) -> dict | None:
+        try:
+            return self.api.get_lactate_threshold()
+        except Exception as e:
+            log.warning("Could not fetch lactate threshold: %s", e)
+            return None

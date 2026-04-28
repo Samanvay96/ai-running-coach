@@ -10,6 +10,7 @@ from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRA
 from .db import Database
 from .training_plan import TrainingPlan
 from .coach import Coach, compute_adherence, compute_weekly_target
+from .retry import with_retry
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +26,29 @@ async def _send_message(text: str):
 
 
 def send_coaching_message(text: str):
-    """Synchronous wrapper to send a Telegram message."""
-    asyncio.run(_send_message(text))
+    """Synchronous wrapper to send a Telegram message, with retry on transient failures.
+
+    On final failure, raises the last exception so the caller (poller) can log it
+    and fire its own error alert. Retries are best-effort cover for 502s and the
+    occasional Telegram/network blip.
+    """
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            asyncio.run(_send_message(text))
+            return
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                log.warning(
+                    "Telegram send attempt %d/3 failed: %r (retry in %.1fs)",
+                    attempt + 1, e, 1.0 * (2 ** attempt),
+                )
+                import time as _time
+                _time.sleep(1.0 * (2 ** attempt))
+    # All attempts exhausted — re-raise so poller surfaces it via send_error_alert.
+    log.warning("Telegram send failed after 3 attempts: %r", last_err)
+    raise last_err  # type: ignore[misc]
 
 
 def send_error_alert(error: str):
@@ -47,8 +69,16 @@ async def _send_document(path: Path, caption: str = ""):
 
 
 def send_backup_to_telegram(path: Path, caption: str = "") -> None:
-    """Synchronous wrapper to send a file (the DB backup) as a Telegram document."""
-    asyncio.run(_send_document(path, caption))
+    """Synchronous wrapper to send a file (the DB backup) as a Telegram document.
+
+    Best-effort with 3-attempt retry; logs warnings and returns None on final
+    failure (a missed backup is recoverable — it'll retry on the next activity
+    or the daily 02:00 timer).
+    """
+    with_retry(
+        lambda: asyncio.run(_send_document(path, caption)),
+        _label=f"backup upload {path.name}",
+    )
 
 
 # --- Interactive bot ---

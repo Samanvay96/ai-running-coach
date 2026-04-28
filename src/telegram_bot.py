@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH, RACE_DATE, PLAN_START_DATE
 from .db import Database
 from .training_plan import TrainingPlan
-from .coach import Coach
+from .coach import Coach, compute_adherence, compute_weekly_target
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +138,24 @@ class CoachBot:
             f"({countdown['pct_complete']}% complete)\n"
             f"Weeks remaining: {countdown['weeks_remaining']}\n\n"
         )
+
+        # Plan adherence + weekly target progress
+        today = date.today()
+        adherence = compute_adherence(self.plan, self.db, today)
+        if adherence["total"] > 0:
+            countdown_text += (
+                f"Adherence: {adherence['completed']}/{adherence['total']} "
+                f"of last {adherence['total']} prescribed runs\n"
+            )
+        weekly_target = compute_weekly_target(self.plan, self.db, today)
+        if weekly_target:
+            countdown_text += (
+                f"This week: {weekly_target['actual_km']}/"
+                f"{weekly_target['target_km']}km "
+                f"({weekly_target['pct']}%, "
+                f"{weekly_target['days_remaining']}d left)\n"
+            )
+        countdown_text += "\n"
 
         # Training status from Garmin
         ts = self.db.get_latest_training_status()

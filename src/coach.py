@@ -446,7 +446,7 @@ Provide:
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            thinking={"type": "adaptive"},
+            thinking={"type": "adaptive", "budget_tokens": 2048},
             output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],
@@ -577,7 +577,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            thinking={"type": "adaptive"},
+            thinking={"type": "adaptive", "budget_tokens": 2048},
             output_config={"effort": "medium"},
             system=self._build_system_prompt(),
             messages=[{"role": "user", "content": user_prompt}],

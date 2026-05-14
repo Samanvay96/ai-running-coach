@@ -1,11 +1,12 @@
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import anthropic
 
-from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, today_local
+from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, RUNNER_TZ
 from .db import Database
+from .time_utils import format_utc_offset
 from .training_plan import TrainingPlan
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,30 @@ def _extract_text(response) -> str:
         f"blocks={block_types}, usage={usage}). "
         f"Likely cause: max_tokens hit during thinking — increase max_tokens."
     )
+
+
+def resolve_runner_today(db: Database, within_days: int = 14) -> tuple[date, str]:
+    """Return (today, source_label) for the runner's current timezone.
+
+    Priority:
+      1. Most recent activity's UTC offset (within `within_days`) — auto-tracks
+         travel without the user having to update env.
+      2. RUNNER_TIMEZONE env var — fallback for new installs or long gaps
+         between runs.
+      3. UTC — last resort if neither signal is available.
+
+    source_label is for the system prompt so the model sees what 'today'
+    is based on and we can spot when a stale offset is leaking in.
+    """
+    offset = db.get_latest_tz_offset_minutes(within_days=within_days)
+    if offset is not None:
+        tz = timezone(timedelta(minutes=offset))
+        today = datetime.now(tz).date()
+        return today, f"UTC{format_utc_offset(offset)} (auto-derived from latest run)"
+    today = datetime.now(RUNNER_TZ).date()
+    if RUNNER_TIMEZONE == "UTC":
+        return today, "UTC (no recent run, RUNNER_TIMEZONE unset)"
+    return today, f"{RUNNER_TIMEZONE} (from RUNNER_TIMEZONE env var)"
 
 
 def format_pace(speed_mps: float) -> str:
@@ -485,7 +510,7 @@ class Coach:
         self.db = db
 
     def _build_system_prompt(self) -> str:
-        today = today_local()
+        today, tz_label = resolve_runner_today(self.db)
         week = self.plan.get_week_for_date(today)
         week_info = (
             f"Week {week.week_number} ({week.phase}), {week.start_date} to {week.end_date}"
@@ -526,7 +551,7 @@ TRAINING PLAN:
 - Phases: Adaptation (wk 1-8), Base Building (wk 9-18), Specific Prep (wk 19-28), Taper (wk 29-32)
 - Running days: Tuesday, Thursday, Saturday (long run)
 - Cross-training: F45 Mon/Wed (reducing to 1x/week from Phase 2)
-- Runner timezone: {RUNNER_TIMEZONE} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
+- Runner timezone: {tz_label} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
 - Current training week: {week_info}
 
 PACE ZONES:
@@ -756,7 +781,7 @@ Provide:
         return _extract_text(response)
 
     def _race_countdown(self) -> dict:
-        today = today_local()
+        today, _ = resolve_runner_today(self.db)
         days_remaining = (RACE_DATE - today).days
         total_weeks = 32
         elapsed_weeks = (today - PLAN_START_DATE).days / 7
@@ -896,7 +921,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
         """Handle interactive conversation via Telegram."""
         history = self.db.get_recent_conversations(limit=10)
         recent_runs = self.db.get_recent_activities(limit=5)
-        today = today_local()
+        today, _ = resolve_runner_today(self.db)
 
         messages = [{"role": h["role"], "content": h["content"]} for h in history]
 

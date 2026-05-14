@@ -8,7 +8,8 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 - 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, and splits
 - 💬 **Sends coaching feedback** to Telegram automatically after each detected run
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
-- 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt; nudges you *before* you overdo it
+- ☀️ **Morning brief** — 06:00 runner-local on prescribed-run days, you get a stick / modify / postpone call based on overnight wellness and load before you even decide what to wear
+- 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt, *and a poller heartbeat* that fires if the service has stalled >6h; nudges you *before* you overdo it
 - ⚠️ **Failure alerts** — if a run analysis fails to generate or deliver, the poller surfaces the exception (with type and `stop_reason`) to Telegram so you notice in seconds, not the next time you check the journal
 - ☁️ **Auto off-Pi backups** — every new run triggers a fresh DB backup that's sent to Telegram, so your training history survives an SD card failure
 - ⌨️ **Telegram commands**:
@@ -124,8 +125,9 @@ This creates a virtual environment, installs dependencies, and installs systemd 
 ```bash
 sudo systemctl start ai-coach-bot              # 🤖 Telegram bot (always-on)
 sudo systemctl start ai-coach-poll.timer       # 📡 Garmin poller (every 2h)
-sudo systemctl enable --now ai-coach-backup.timer ai-coach-alerts.timer
-                                                # 💾 Daily 02:00 backup + 08:00 wellness alerts
+sudo systemctl enable --now ai-coach-backup.timer ai-coach-alerts.timer ai-coach-prerun.timer
+                                                # 💾 Daily 02:00 backup, 08:00 wellness alerts,
+                                                #    hourly pre-run gate (fires at runner-local 06:00)
 ```
 
 All services auto-start on boot.

@@ -1,0 +1,13 @@
+[Unit]
+Description=AI Running Coach Morning Brief Timer
+
+[Timer]
+# Fire every hour; the code gates to runner-local 06:00 and dedups via
+# prerun_sent so only one of the 24 daily firings actually sends a message.
+# This keeps the brief firing at the right local time across travel without
+# having to rewrite the unit when timezones change.
+OnCalendar=*-*-* *:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

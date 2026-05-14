@@ -948,6 +948,87 @@ Keep it Telegram-friendly (under 3000 chars)."""
         )
         return _extract_text(response)
 
+    def morning_brief(self, today: date) -> str:
+        """Generate a short pre-run advisory: stick with the plan, modify, or postpone.
+
+        Pulls the same context analyze_run uses — wellness (with staleness flag),
+        ACR, weekly progress, prescribed workout, upcoming runs — and asks the
+        model for a one-line verdict + specific modification if warranted.
+        Designed to fire at 06:00 runner-local, hours before the prescribed run.
+        """
+        prescribed = self.plan.get_prescribed_run(today)
+        if not prescribed or prescribed.workout_type == "rest":
+            # The caller (prerun.py) gates on this too, but defend in depth.
+            return ""
+
+        weekday_name = today.strftime("%A, %B %d")
+        wellness = self.db.get_latest_wellness()
+        recovery_text = format_recovery(wellness, today)
+        acr = compute_acr(self.db, today)
+        acr_text = (
+            f"ACR {acr['ratio']} (acute 7d={acr['acute_7d']}, chronic 28d={acr['chronic_28d']}; "
+            f"sweet spot 0.8–1.3, danger >1.5)"
+            if acr else "ACR: insufficient training-load history"
+        )
+        target = compute_weekly_target(self.plan, self.db, today)
+        weekly_target_text = (
+            f"Wk {target['week_number']} ({target['phase']}): "
+            f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%) "
+            f"with {target['days_remaining']} days remaining in week"
+            if target else "Outside training plan window"
+        )
+        upcoming = format_upcoming_runs(self.plan, today, days=3)
+        ts = self.db.get_latest_training_status()
+        ts_text = "Not available"
+        if ts:
+            ts_text = (
+                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
+                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
+                f"Status: {ts.get('training_status_label', 'N/A')}"
+            )
+
+        prescribed_text = prescribed.description.replace("\n", " ")
+
+        user_prompt = f"""It's early morning — runner hasn't trained yet today. Give a pre-run brief that helps them decide what to do this morning.
+
+TODAY ({weekday_name}):
+- Prescribed: {prescribed_text}
+
+RECOVERY & READINESS (last available night):
+{recovery_text}
+
+LOAD CONTEXT:
+- {acr_text}
+- Weekly target: {weekly_target_text}
+
+TRAINING STATUS:
+{ts_text}
+
+NEXT FEW DAYS:
+{upcoming}
+
+Provide:
+1. **Verdict** in one short line — one of: stick with plan / modify / postpone / skip.
+2. **Recommendation** if modifying — specific (e.g. "drop pace to easy 6:30/km", "swap with Saturday's easy run", "cut to 4km"). One sentence.
+3. **Why** — one short sentence citing the specific data point that drove the call (e.g. "HRV down 18% from baseline").
+
+If stale-wellness flag is present, lean toward "trust your legs this morning — recent data missing."
+Keep the whole thing under 500 chars — runner is reading on phone half-awake. No greetings, no sign-off."""
+
+        response = self.client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": self._build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return _extract_text(response)
+
     def chat(self, user_message: str) -> str:
         """Handle interactive conversation via Telegram."""
         history = self.db.get_recent_conversations(limit=10)

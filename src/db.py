@@ -78,6 +78,12 @@ CREATE TABLE IF NOT EXISTS system_health (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_poll_completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS prerun_sent (
+    runner_date TEXT PRIMARY KEY,
+    sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    brief_text TEXT
+);
 """
 
 MIGRATIONS = [
@@ -344,6 +350,20 @@ class Database:
             """INSERT INTO weekly_summaries (week_number, week_start, week_end, summary_text)
             VALUES (?, ?, ?, ?)""",
             (week_number, week_start, week_end, summary_text)
+        )
+        self.conn.commit()
+
+    def prerun_sent_today(self, runner_date: str) -> bool:
+        """Has a morning brief already gone out for this runner-local date?"""
+        row = self.conn.execute(
+            "SELECT 1 FROM prerun_sent WHERE runner_date = ?", (runner_date,)
+        ).fetchone()
+        return row is not None
+
+    def save_prerun(self, runner_date: str, brief_text: str) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO prerun_sent (runner_date, brief_text) VALUES (?, ?)",
+            (runner_date, brief_text),
         )
         self.conn.commit()
 

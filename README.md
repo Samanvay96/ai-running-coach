@@ -5,10 +5,11 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 ## ✨ What it does
 
 - 📡 **Monitors Garmin Connect** for new running activities (polls every 2 hours)
-- 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, and splits
-- 💬 **Sends coaching feedback** to Telegram automatically after each detected run
+- 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, splits, weather, and the RPE / Feel score you logged on the watch
+- 💬 **Sends coaching feedback** to Telegram automatically after each detected run (rendered with proper bold sections, no leaked markdown asterisks)
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
 - ☀️ **Morning brief** — 06:00 runner-local on prescribed-run days, you get a stick / modify / postpone call based on overnight wellness and load before you even decide what to wear
+- 🌍 **Travel-aware** — auto-derives your current timezone from your latest activity's UTC offset, so "today" in every analysis matches what your watch shows, not the Pi's clock
 - 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt, *and a poller heartbeat* that fires if the service has stalled >6h; nudges you *before* you overdo it
 - ⚠️ **Failure alerts** — if a run analysis fails to generate or deliver, the poller surfaces the exception (with type and `stop_reason`) to Telegram so you notice in seconds, not the next time you check the journal
 - ☁️ **Auto off-Pi backups** — every new run triggers a fresh DB backup that's sent to Telegram, so your training history survives an SD card failure
@@ -27,11 +28,14 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 - 💗 Resting HR + 7-day trend
 - ⚖️ Acute:Chronic load ratio (acute 7d / chronic 28d-weekly-equivalent — sweet spot 0.8–1.3)
 - 📈 Week-over-week mileage delta vs prior 4-week average
+- 🕰️ Stale-data flag — when the last available wellness night is >1 day behind, the prompt explicitly tells the model to discount it
 
 **🏃‍♂️ Run quality (Tier 2)**
 - 📉 HR drift / aerobic decoupling — 1st-vs-2nd-half pace + HR comparison
-- 🎯 Z2 time-in-zone % — derived via Karvonen / %HRR using your max HR (220−age) and latest overnight RHR
+- 🎯 Easy (Z1+Z2) time-in-zone % — derived via Karvonen / %HRR using your max HR (220−age) and latest overnight RHR; shown with Z1 / Z2 / Z3+ breakdown so over-easy and over-hard runs both surface
 - 🩸 Lactate threshold pace + HR (Garmin estimate)
+- 🌦️ Weather (temp, humidity, wind, conditions) — model is told to discount HR drift at ≥25°C or warm-and-humid
+- 🥵 Perceived effort + Feel — the 1–10 RPE and Very Weak → Very Strong rating you give the watch post-run; flagged as a divergence-from-objective signal
 - 🪜 Per-km splits with HR per km
 
 **🗓️ Plan context**
@@ -48,12 +52,14 @@ Four scheduled jobs + one always-on bot, all running under systemd on a Raspberr
 Garmin Connect ──(every 2h)──> Poller ──(new run?)──> LLM Analysis ──> Telegram
                                   │                        ↑
                                   ├── SQLite ←── Training Plan (Excel)
-                                  └── Daily wellness (sleep / HRV / RHR)
+                                  ├── Daily wellness (sleep / HRV / RHR)
+                                  └── tz_offset_minutes per activity (auto-tracks travel)
                                           ↓
                                           ├──(after each run)── Backup → Telegram
                                           ↓
        (daily 02:00) ─────── Backup timer ──→ data/backups/coach-YYYYMMDD.db.gz
-       (daily 08:00) ─────── Alerts timer ──→ Combined wellness nudge → Telegram
+       (daily 08:00) ─────── Alerts timer ──→ Wellness nudge + poller heartbeat → Telegram
+       (hourly, gated) ────── Prerun timer ──→ Morning brief at 06:00 runner-local → Telegram
 
 Telegram user ──(message / /command)──> Bot ──> LLM Chat ──> Reply
 ```
@@ -94,11 +100,14 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 TELEGRAM_CHAT_ID=your_numeric_chat_id
 ANTHROPIC_API_KEY=sk-ant-...
 RUNNER_AGE=30
+RUNNER_TIMEZONE=Europe/London
 ```
 
 > 💡 **Getting your Telegram chat ID:** Send a message to your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` — your chat ID is in the response.
 >
 > 🫀 **`RUNNER_AGE`** is used to derive `MAX_HR = 220 − age` for Z2 zone math (Karvonen / %HRR formula). The 220−age estimate is approximate (±10 bpm typical).
+>
+> 🌍 **`RUNNER_TIMEZONE`** is a *fallback only*. The coach normally auto-derives your current timezone from the UTC offset of your latest activity (within 14 days), so you don't need to update this when travelling. Used only when there's no recent run.
 
 ### 3️⃣ Add your training plan
 
@@ -153,6 +162,7 @@ sudo systemctl status ai-coach-bot
 sudo systemctl status ai-coach-poll.timer
 sudo systemctl status ai-coach-backup.timer
 sudo systemctl status ai-coach-alerts.timer
+sudo systemctl status ai-coach-prerun.timer
 systemctl list-timers ai-coach-*.timer       # see all next-fire times at a glance
 ```
 
@@ -163,6 +173,7 @@ journalctl -u ai-coach-bot -f         # Bot logs
 journalctl -u ai-coach-poll -f        # Poller logs
 journalctl -u ai-coach-backup -f      # Backup logs
 journalctl -u ai-coach-alerts -f      # Alert logs
+journalctl -u ai-coach-prerun -f      # Morning-brief logs (shows which hourly fires gate out vs send)
 ```
 
 ### ⚡ Run any job manually
@@ -171,6 +182,7 @@ journalctl -u ai-coach-alerts -f      # Alert logs
 .venv/bin/python -m src.poller                # Poll now
 .venv/bin/python -m src.backup                # Run a backup now
 .venv/bin/python -m src.alerts                # Run wellness check now
+.venv/bin/python -m src.prerun --force        # Send a morning brief now (bypass the 06:00-local gate)
 .venv/bin/python -m src.backfill_wellness 30  # Backfill 30 days of overnight data
 .venv/bin/python -m scripts.replay_analyze <activity_id> --deliver
                                               # Re-run analysis for a stored activity, save, and send to Telegram
@@ -198,6 +210,7 @@ you):
 | RHR creep | last 3 nights avg ≥ prior 11-night baseline + 5 bpm | Classic overreach / illness-brewing signal |
 | HRV drop | 3 nights all `UNBALANCED` OR ≥15% below 7-day avg | Confirms autonomic stress |
 | Sleep debt | 3-night avg < 6.5h | Below recovery threshold; hard runs will compound damage |
+| Poller heartbeat | no successful poll completion in ≥6h (3 missed polls) | Catches silent service failures — expired Garmin tokens, network loss, stalled timer — that today would only surface as missing analyses. Bypasses the 3-day cooldown so it re-fires daily until fixed |
 
 ## 💾 Backup behaviour
 
@@ -215,15 +228,18 @@ Snapshots use SQLite's `.backup()` API, so they're atomic even while the bot is 
 ├── 🔧 setup.sh                    # One-time setup script
 ├── 📂 src/
 │   ├── ⚙️  config.py               # Environment config and constants
-│   ├── 💾 db.py                   # SQLite database layer
+│   ├── 💾 db.py                   # SQLite database layer (auto-runs migrations + tz backfill)
 │   ├── 📋 training_plan.py        # Excel training plan parser (auto-reload on edit)
 │   ├── ⌚ garmin_client.py        # Garmin Connect API wrapper (with retries)
 │   ├── 🧠 coach.py                # LLM coaching engine + metric helpers
-│   ├── 💬 telegram_bot.py         # Telegram bot handlers + commands
+│   ├── 💬 telegram_bot.py         # Telegram bot handlers + commands + HTML formatter
 │   ├── 🔄 poller.py               # New run detection and analysis
+│   ├── ☀️  prerun.py               # Morning-brief entry point (hourly fire, 06:00-local gate)
 │   ├── 💾 backup.py               # SQLite atomic snapshot + rotation
-│   ├── 🚨 alerts.py               # Daily proactive overload checks
+│   ├── 🚨 alerts.py               # Daily proactive overload + heartbeat checks
 │   ├── 🌙 backfill_wellness.py    # One-shot wellness history loader
+│   ├── 🕰️  time_utils.py           # Tz offset parsing / formatting helpers
+│   ├── 🔁 retry.py                # with_retry wrapper used by Garmin + Telegram calls
 │   └── 🚪 main.py                 # Bot entry point
 ├── 🧰 scripts/                    # One-off diagnostics (replay an activity's analysis, etc.)
 └── 🛠️  systemd/                    # systemd service + timer units

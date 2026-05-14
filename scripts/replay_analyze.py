@@ -46,6 +46,7 @@ def main() -> int:
         return 1
 
     raw = json.loads(row["raw_json"])
+    cols = row.keys()
     activity_for_coach = {
         "start_time": row["start_time"],
         "distance_km": row["distance_km"],
@@ -63,6 +64,14 @@ def main() -> int:
         "splits_json": row["splits_json"],
         "hr_zones_json": row["hr_zones_json"],
         "training_load": row["training_load"],
+        # Weather + RPE/feel — guarded for replays of pre-migration rows.
+        "temp_c": row["temp_c"] if "temp_c" in cols else None,
+        "apparent_temp_c": row["apparent_temp_c"] if "apparent_temp_c" in cols else None,
+        "humidity_pct": row["humidity_pct"] if "humidity_pct" in cols else None,
+        "wind_kph": row["wind_kph"] if "wind_kph" in cols else None,
+        "weather_label": row["weather_label"] if "weather_label" in cols else None,
+        "rpe": row["rpe"] if "rpe" in cols else None,
+        "feel": row["feel"] if "feel" in cols else None,
     }
 
     db = Database(DB_PATH)

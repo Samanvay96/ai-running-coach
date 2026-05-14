@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.coach import Coach, _extract_text
+from src.coach import Coach, _extract_text, format_feel, format_weather, heat_note
 from src.config import DB_PATH, TRAINING_PLAN_PATH
 from src.db import Database
 from src.training_plan import TrainingPlan
@@ -135,6 +135,76 @@ def test_analyze_run_propagates_no_text_failure(coach):
     }
     with pytest.raises(RuntimeError, match="max_tokens"):
         coach.analyze_run(activity)
+
+
+# ---------------- weather + RPE/feel formatting ----------------
+
+
+def test_format_feel_snaps_to_garmin_buckets():
+    assert format_feel(0) == "Very Weak"
+    assert format_feel(25) == "Weak"
+    assert format_feel(50) == "Normal"
+    assert format_feel(75) == "Strong"
+    assert format_feel(100) == "Very Strong"
+    # Off-bucket values round to the nearest 25
+    assert format_feel(60) == "Normal"
+    assert format_feel(None) is None
+
+
+def test_format_weather_outdoor_run():
+    text = format_weather({
+        "temp_c": 22, "apparent_temp_c": 24, "humidity_pct": 65,
+        "wind_kph": 10, "weather_label": "Cloudy",
+    })
+    assert "22°C" in text
+    assert "65%" in text or "65" in text
+    assert "Cloudy" in text
+
+
+def test_format_weather_indoor_fallback():
+    assert "indoor" in format_weather({}).lower()
+
+
+def test_heat_note_fires_above_25c():
+    assert "heat" in heat_note({"temp_c": 28, "humidity_pct": 50}).lower()
+
+
+def test_heat_note_fires_for_warm_and_humid():
+    assert heat_note({"temp_c": 22, "humidity_pct": 80}) != ""
+
+
+def test_heat_note_quiet_in_cool_conditions():
+    assert heat_note({"temp_c": 12, "humidity_pct": 60}) == ""
+
+
+def test_analyze_run_prompt_includes_conditions_and_subjective(coach):
+    """Both new prompt sections must reach the model when fields are present."""
+    coach.client.messages.create.return_value = _response([_block("text", "ok")])
+    activity = {
+        "start_time": "2026-05-14 09:23:45",
+        "distance_km": 8.0,
+        "duration_seconds": 3000,
+        "avg_pace_min_km": "6:15",
+        "avg_hr": 152,
+        "max_hr": 168,
+        "splits_json": "[]",
+        "hr_zones_json": None,
+        "temp_c": 28,
+        "humidity_pct": 60,
+        "weather_label": "Sunny",
+        "rpe": 7,
+        "feel": 25,  # "Weak"
+    }
+    coach.analyze_run(activity)
+    prompt = coach.client.messages.create.call_args.kwargs["messages"][-1]["content"]
+    assert "CONDITIONS:" in prompt
+    assert "28°C" in prompt
+    assert "Sunny" in prompt
+    assert "SUBJECTIVE EFFORT" in prompt
+    assert "RPE 7" in prompt
+    assert "Weak" in prompt
+    # Heat cue should be present for 28°C runs
+    assert "heat" in prompt.lower()
 
 
 def test_chat_returns_text_with_rich_context(coach):

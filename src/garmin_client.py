@@ -59,6 +59,16 @@ class GarminClient:
             _label=f"HR zones for activity {activity_id}",
         ) or []
 
+    def get_activity_weather(self, activity_id: int) -> dict | None:
+        """Garmin's weather snapshot for the activity (temp, humidity, wind, etc.).
+
+        Returns None for indoor / treadmill runs where Garmin has no weather record.
+        """
+        return _with_retry(
+            self.api.get_activity_weather, activity_id,
+            _label=f"weather for activity {activity_id}",
+        )
+
     def get_training_status(self) -> dict | None:
         return _with_retry(
             self.api.get_training_status, date.today().isoformat(),

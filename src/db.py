@@ -81,6 +81,14 @@ MIGRATIONS = [
     "ALTER TABLE activities ADD COLUMN hr_zones_json TEXT",
     "ALTER TABLE training_status ADD COLUMN lt_pace_min_km REAL",
     "ALTER TABLE training_status ADD COLUMN lt_hr INTEGER",
+    "ALTER TABLE activities ADD COLUMN temp_c REAL",
+    "ALTER TABLE activities ADD COLUMN apparent_temp_c REAL",
+    "ALTER TABLE activities ADD COLUMN humidity_pct REAL",
+    "ALTER TABLE activities ADD COLUMN wind_kph REAL",
+    "ALTER TABLE activities ADD COLUMN weather_label TEXT",
+    "ALTER TABLE activities ADD COLUMN weather_json TEXT",
+    "ALTER TABLE activities ADD COLUMN rpe REAL",
+    "ALTER TABLE activities ADD COLUMN feel INTEGER",
 ]
 
 
@@ -115,18 +123,31 @@ class Database:
                       elevation_loss: float | None = None,
                       anaerobic_te: float | None = None,
                       training_load: float | None = None,
-                      hr_zones_json: str | None = None) -> None:
+                      hr_zones_json: str | None = None,
+                      temp_c: float | None = None,
+                      apparent_temp_c: float | None = None,
+                      humidity_pct: float | None = None,
+                      wind_kph: float | None = None,
+                      weather_label: str | None = None,
+                      weather_json: str | None = None,
+                      rpe: float | None = None,
+                      feel: int | None = None) -> None:
         self.conn.execute(
             """INSERT OR IGNORE INTO activities
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace_min_km, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
-             raw_json, splits_json, training_load, hr_zones_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             raw_json, splits_json, training_load, hr_zones_json,
+             temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
+             rpe, feel)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?)""",
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
-             raw_json, splits_json, training_load, hr_zones_json)
+             raw_json, splits_json, training_load, hr_zones_json,
+             temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
+             rpe, feel)
         )
         self.conn.commit()
 

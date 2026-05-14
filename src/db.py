@@ -1,6 +1,9 @@
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .time_utils import compute_tz_offset_minutes
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS activities (
@@ -89,6 +92,7 @@ MIGRATIONS = [
     "ALTER TABLE activities ADD COLUMN weather_json TEXT",
     "ALTER TABLE activities ADD COLUMN rpe REAL",
     "ALTER TABLE activities ADD COLUMN feel INTEGER",
+    "ALTER TABLE activities ADD COLUMN tz_offset_minutes INTEGER",
 ]
 
 
@@ -99,6 +103,8 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._run_migrations()
+        # Idempotent — only does work on rows where the column is still NULL.
+        self.backfill_tz_offsets()
 
     def _run_migrations(self):
         for sql in MIGRATIONS:
@@ -131,7 +137,8 @@ class Database:
                       weather_label: str | None = None,
                       weather_json: str | None = None,
                       rpe: float | None = None,
-                      feel: int | None = None) -> None:
+                      feel: int | None = None,
+                      tz_offset_minutes: int | None = None) -> None:
         self.conn.execute(
             """INSERT OR IGNORE INTO activities
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
@@ -139,15 +146,15 @@ class Database:
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
              raw_json, splits_json, training_load, hr_zones_json,
              temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
-             rpe, feel)
+             rpe, feel, tz_offset_minutes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
              raw_json, splits_json, training_load, hr_zones_json,
              temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
-             rpe, feel)
+             rpe, feel, tz_offset_minutes)
         )
         self.conn.commit()
 
@@ -276,6 +283,55 @@ class Database:
             (start_date, end_date)
         ).fetchone()
         return float(row["total"] or 0)
+
+    def get_latest_tz_offset_minutes(self, within_days: int = 14) -> int | None:
+        """Most recent activity's UTC offset, only if the run was within `within_days`.
+
+        Filtering by recency means an old offset from a past trip can't keep
+        overriding the runner's actual current location if they don't run for
+        a while. Falls to None on no match — caller should fall back to env.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=within_days)).strftime("%Y-%m-%d")
+        row = self.conn.execute(
+            """SELECT tz_offset_minutes FROM activities
+               WHERE tz_offset_minutes IS NOT NULL AND start_time >= ?
+               ORDER BY start_time DESC LIMIT 1""",
+            (cutoff,),
+        ).fetchone()
+        return int(row["tz_offset_minutes"]) if row else None
+
+    def backfill_tz_offsets(self) -> int:
+        """One-time pass: derive tz_offset_minutes from raw_json for rows where it's NULL.
+
+        Idempotent — after the first call populates everything, subsequent calls do
+        no writes (the WHERE clause filters to NULL rows). Runs on every Database
+        open so existing installs auto-populate without a manual script.
+        Returns the number of rows updated.
+        """
+        rows = self.conn.execute(
+            """SELECT activity_id, raw_json FROM activities
+               WHERE tz_offset_minutes IS NULL AND raw_json IS NOT NULL"""
+        ).fetchall()
+        n = 0
+        for row in rows:
+            try:
+                raw = json.loads(row["raw_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            offset = compute_tz_offset_minutes(
+                raw.get("startTimeLocal"),
+                raw.get("startTimeGMT"),
+            )
+            if offset is None:
+                continue
+            self.conn.execute(
+                "UPDATE activities SET tz_offset_minutes = ? WHERE activity_id = ?",
+                (offset, row["activity_id"]),
+            )
+            n += 1
+        if n:
+            self.conn.commit()
+        return n
 
     def save_weekly_summary(self, week_number: int, week_start: str, week_end: str,
                             summary_text: str) -> None:

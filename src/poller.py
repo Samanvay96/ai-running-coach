@@ -21,6 +21,7 @@ from src.training_plan import TrainingPlan
 from src.coach import Coach, format_pace
 from src.telegram_bot import send_coaching_message, send_error_alert, send_backup_to_telegram
 from src.backup import run_backup
+from src.time_utils import compute_tz_offset_minutes
 
 
 def extract_weather_fields(weather: dict | None) -> dict:
@@ -112,6 +113,14 @@ def poll():
         rpe = activity.get("directWorkoutRpe") or activity.get("workoutRpe")
         feel = activity.get("directWorkoutFeel") or activity.get("workoutFeel")
 
+        # Capture the runner's UTC offset at the time of the run, so the coach
+        # prompt can later derive "today in the runner's local time" without
+        # depending on the Pi's clock or a manually-set RUNNER_TIMEZONE.
+        tz_offset_minutes = compute_tz_offset_minutes(
+            activity.get("startTimeLocal"),
+            activity.get("startTimeGMT"),
+        )
+
         db.save_activity(
             activity_id=activity_id,
             start_time=activity.get("startTimeLocal", ""),
@@ -140,6 +149,7 @@ def poll():
             weather_json=json.dumps(weather) if weather else None,
             rpe=rpe,
             feel=feel,
+            tz_offset_minutes=tz_offset_minutes,
         )
 
         # Build activity dict for coach (matches what coach.analyze_run expects)

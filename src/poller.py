@@ -318,6 +318,9 @@ def poll():
                 log.error("Failed to send weekly summary: %s", e)
                 send_error_alert(f"Weekly summary failed: {e}")
 
+    # Heartbeat: mark this poll as complete so the daily alert can detect a
+    # stalled poller (no successful completion in >6h means 3 polls missed).
+    db.mark_poll_completed()
     db.close()
 
 

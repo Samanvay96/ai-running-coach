@@ -14,11 +14,13 @@ overreach from re-firing every morning.
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from statistics import mean
 
 from .config import DB_PATH
 from .db import Database
+
+HEARTBEAT_STALE_HOURS = 6  # 3 missed polls (poller fires every 2h)
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +122,40 @@ def check_hrv(db: Database) -> Alert | None:
     return None
 
 
+def check_heartbeat(db: Database) -> Alert | None:
+    """Detect a stalled poller. Fires when no successful poll completion in HEARTBEAT_STALE_HOURS.
+
+    This catches silent failures (expired Garmin tokens, network loss, systemd
+    timer drift) that today would only be noticed via missing run analyses.
+    Skips cooldown so it re-fires daily until the service is fixed.
+    """
+    last = db.get_last_poll_completed_at()
+    now = datetime.now(timezone.utc)
+    if last is None:
+        return Alert(
+            kind="poller_stalled",
+            severity="high",
+            message=(
+                "🚨 Poller has never completed a successful run since this heartbeat "
+                "was added. Check `journalctl -u ai-coach-poll -e` and `systemctl status "
+                "ai-coach-poll.timer`."
+            ),
+        )
+    age_hours = (now - last).total_seconds() / 3600
+    if age_hours >= HEARTBEAT_STALE_HOURS:
+        return Alert(
+            kind="poller_stalled",
+            severity="high",
+            message=(
+                f"🚨 Poller hasn't completed in {age_hours:.1f}h (expected ≤2h). "
+                f"Last success: {last.isoformat(timespec='minutes')}. "
+                f"Check `journalctl -u ai-coach-poll -e` and `systemctl status "
+                f"ai-coach-poll.timer`."
+            ),
+        )
+    return None
+
+
 def check_sleep(db: Database) -> Alert | None:
     today = date.today()
     rows = db.get_wellness_for_range(
@@ -181,7 +217,10 @@ def run_checks() -> int:
     try:
         _ensure_alert_history(db)
 
-        checks = [check_acr, check_rhr, check_hrv, check_sleep]
+        checks = [check_acr, check_rhr, check_hrv, check_sleep, check_heartbeat]
+        # Heartbeat bypasses cooldown — if the poller is stalled we want to be
+        # reminded every day, not once every three days.
+        no_cooldown = {"poller_stalled"}
         firing: list[Alert] = []
         for fn in checks:
             try:
@@ -189,7 +228,9 @@ def run_checks() -> int:
             except Exception as e:
                 log.warning("Alert check %s crashed: %s", fn.__name__, e)
                 continue
-            if alert and not _within_cooldown(db, alert.kind):
+            if not alert:
+                continue
+            if alert.kind in no_cooldown or not _within_cooldown(db, alert.kind):
                 firing.append(alert)
 
         if not firing:

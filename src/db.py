@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS daily_wellness (
     raw_json TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS system_health (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_poll_completed_at TEXT
+);
 """
 
 MIGRATIONS = [
@@ -341,6 +346,29 @@ class Database:
             (week_number, week_start, week_end, summary_text)
         )
         self.conn.commit()
+
+    def mark_poll_completed(self) -> None:
+        """Record a successful poll completion. The daily alert uses the most
+        recent value to detect a stalled poller (no completion in >6h)."""
+        self.conn.execute(
+            """INSERT INTO system_health (id, last_poll_completed_at)
+               VALUES (1, CURRENT_TIMESTAMP)
+               ON CONFLICT(id) DO UPDATE SET last_poll_completed_at = CURRENT_TIMESTAMP"""
+        )
+        self.conn.commit()
+
+    def get_last_poll_completed_at(self) -> datetime | None:
+        """Most recent successful poll completion (UTC). None if poller has never run."""
+        row = self.conn.execute(
+            "SELECT last_poll_completed_at FROM system_health WHERE id = 1"
+        ).fetchone()
+        if not row or not row["last_poll_completed_at"]:
+            return None
+        # SQLite CURRENT_TIMESTAMP returns naive UTC like "2026-05-14 10:23:45"
+        try:
+            return datetime.fromisoformat(row["last_poll_completed_at"]).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
 
     def close(self):
         self.conn.close()

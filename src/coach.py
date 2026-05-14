@@ -481,7 +481,14 @@ def heat_note(activity: dict) -> str:
     return ""
 
 
-def format_recovery(wellness: dict | None) -> str:
+def format_recovery(wellness: dict | None, today: date | None = None) -> str:
+    """Format the latest wellness row for the coach prompt.
+
+    When `today` is given and the wellness row is >1 day behind, an explicit
+    staleness flag is appended so the model knows to discount it — without
+    that signal it would anchor on potentially-irrelevant HRV / sleep readings
+    from a missed watch night.
+    """
     if not wellness:
         return "No recent wellness data"
     parts = []
@@ -500,7 +507,31 @@ def format_recovery(wellness: dict | None) -> str:
                 parts[-1] += ")"
     if wellness.get("rhr") is not None:
         parts.append(f"RHR: {wellness['rhr']} bpm")
-    return " | ".join(parts) if parts else "No recent wellness data"
+
+    if not parts:
+        return "No recent wellness data"
+
+    staleness = _wellness_staleness(wellness, today)
+    if staleness:
+        parts.append(staleness)
+    return " | ".join(parts)
+
+
+def _wellness_staleness(wellness: dict, today: date | None) -> str | None:
+    """Return a '(stale, N days old)' tag when the wellness row is >1 day behind today."""
+    if today is None:
+        return None
+    raw = wellness.get("date")
+    if not raw:
+        return None
+    try:
+        wellness_date = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+    age = (today - wellness_date).days
+    if age <= 1:  # yesterday's data is fresh — Garmin records sleep after waking
+        return None
+    return f"⚠️ stale: {age} days old — discount weight if today's state feels different"
 
 
 class Coach:
@@ -600,7 +631,7 @@ COACHING STYLE:
 
         # Recovery & readiness from latest wellness row
         latest_wellness = self.db.get_latest_wellness()
-        recovery_text = format_recovery(latest_wellness)
+        recovery_text = format_recovery(latest_wellness, run_date)
         rhr_for_zones = latest_wellness.get("rhr") if latest_wellness else None
 
         # Run-quality metrics
@@ -962,7 +993,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
             )
 
         wellness = self.db.get_latest_wellness()
-        recovery = format_recovery(wellness)
+        recovery = format_recovery(wellness, today)
         if recovery and recovery != "No recent wellness data":
             context_lines.append(f"Latest wellness: {recovery}")
 

@@ -16,13 +16,19 @@ or delete completed ones at the start of the next.
 - [x] ~~Cross-run trend awareness~~ — done 2026-04-28: `compute_easy_run_trend`
   shows last 4 easy runs with HR-per-speed and drift% in `analyze_run`.
 
-- [ ] **Pull running power / power zones** *(if watch supports)* — power is a
-  more stable effort signal than HR for short or hot runs. Currently we don't
-  read it. One Garmin field at extraction time + one prompt line.
+- [ ] **Pull running power / power zones** *(if watch supports)* — deferred
+  2026-05-14: runner doesn't currently use power, so surfacing it would add
+  noise. Revisit if/when they start training by power.
 
-- [ ] **Track perceived effort** — bot prompts "how hard did that feel? 1-10"
-  after each run; stored on the activity. Subjective vs objective HR/pace
-  divergence is a strong injury/illness predictor.
+- [x] ~~Track perceived effort~~ — done 2026-05-14: poller now pulls
+  `directWorkoutRpe` and `directWorkoutFeel` straight off the activity payload
+  (the watch already prompts post-run), stores them on `activities`, and
+  `analyze_run` flags RPE-vs-HR divergence as an early fatigue/illness signal.
+
+- [x] ~~Weather context~~ — done 2026-05-14: `garmin_client.get_activity_weather`
+  + new `temp_c` / `humidity_pct` / `wind_kph` / `weather_label` columns; coach
+  prompt now includes a CONDITIONS line and tells the model to discount HR
+  drift at ≥25°C (or ≥20°C + ≥70% humidity).
 
 - [ ] **Weekly mood/energy check-in** — Sunday Telegram nudge: "1-10 on legs,
   1-10 on motivation." Catches mental burnout that wellness data misses.

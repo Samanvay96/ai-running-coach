@@ -358,6 +358,80 @@ def format_upcoming_runs(plan: TrainingPlan, today: date, days: int = 3) -> str:
     return "\n".join(lines) if lines else "No upcoming prescription"
 
 
+_FEEL_LABELS = {
+    0: "Very Weak",
+    25: "Weak",
+    50: "Normal",
+    75: "Strong",
+    100: "Very Strong",
+}
+
+
+def format_feel(feel: int | float | None) -> str | None:
+    """Map Garmin's 0–100 feel score (step 25) to its on-watch label."""
+    if feel is None:
+        return None
+    try:
+        f = int(round(float(feel) / 25.0) * 25)
+    except (TypeError, ValueError):
+        return None
+    return _FEEL_LABELS.get(f, f"Score {feel}")
+
+
+def format_weather(activity: dict) -> str:
+    """One-line weather summary for the prompt. Returns 'Not recorded' for indoor runs."""
+    temp = activity.get("temp_c")
+    if temp is None and not activity.get("weather_label"):
+        return "Not recorded (likely indoor / treadmill)"
+    parts: list[str] = []
+    if temp is not None:
+        try:
+            parts.append(f"{float(temp):.0f}°C")
+        except (TypeError, ValueError):
+            pass
+    apparent = activity.get("apparent_temp_c")
+    if apparent is not None:
+        try:
+            ap = float(apparent)
+            # Skip if it's identical to actual temp — adds no signal
+            if temp is None or abs(ap - float(temp)) >= 1:
+                parts.append(f"feels {ap:.0f}°C")
+        except (TypeError, ValueError):
+            pass
+    humidity = activity.get("humidity_pct")
+    if humidity is not None:
+        try:
+            parts.append(f"{float(humidity):.0f}% humidity")
+        except (TypeError, ValueError):
+            pass
+    wind = activity.get("wind_kph")
+    if wind is not None:
+        try:
+            parts.append(f"wind {float(wind):.0f} kph")
+        except (TypeError, ValueError):
+            pass
+    label = activity.get("weather_label")
+    if label:
+        parts.append(str(label))
+    return " | ".join(parts) if parts else "Not recorded"
+
+
+def heat_note(activity: dict) -> str:
+    """Inline cue for the model when conditions distort HR-based reads."""
+    temp = activity.get("temp_c")
+    humidity = activity.get("humidity_pct")
+    try:
+        t = float(temp) if temp is not None else None
+        h = float(humidity) if humidity is not None else None
+    except (TypeError, ValueError):
+        return ""
+    if t is not None and t >= 25:
+        return " — heat-adjusted read: discount HR drift, expect higher HR at same effort"
+    if t is not None and t >= 20 and h is not None and h >= 70:
+        return " — warm + humid: discount some HR drift"
+    return ""
+
+
 def format_recovery(wellness: dict | None) -> str:
     if not wellness:
         return "No recent wellness data"
@@ -557,6 +631,22 @@ COACHING STYLE:
         else:
             trend_text = "Not enough easy-run history yet for a trend (need 2+)"
 
+        # Conditions + subjective effort (from the watch's post-run prompt)
+        weather_text = format_weather(activity)
+        heat_cue = heat_note(activity)
+        rpe = activity.get("rpe")
+        feel = activity.get("feel")
+        feel_label = format_feel(feel)
+        if rpe is None and feel_label is None:
+            subjective_text = "Not logged (no watch prompt response)"
+        else:
+            bits = []
+            if rpe is not None:
+                bits.append(f"RPE {rpe}/10")
+            if feel_label is not None:
+                bits.append(f"Feel: {feel_label}")
+            subjective_text = " | ".join(bits)
+
         user_prompt = f"""Analyze this run and provide coaching feedback.
 
 TODAY'S RUN ({weekday_name}):
@@ -571,6 +661,12 @@ TODAY'S RUN ({weekday_name}):
 - Aerobic TE: {activity.get('aerobic_te', 'N/A')} | Anaerobic TE: {activity.get('anaerobic_te', 'N/A')}
 - Training Load: {activity.get('training_load', 'N/A')}
 - Garmin Assessment: {activity.get('training_effect_label', 'N/A')}
+
+CONDITIONS:
+- Weather: {weather_text}{heat_cue}
+
+SUBJECTIVE EFFORT (from watch post-run prompt):
+- {subjective_text}
 
 RUN QUALITY:
 - HR Drift: {drift_text}
@@ -603,14 +699,15 @@ RECENT TRAINING:
 Provide:
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
-3. HR/effort analysis — explicitly use HR drift % and Z2 time-in-zone (call out if easy ran too hard)
-4. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
-5. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
-6. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
-7. Cadence & elevation note (if relevant)
-8. One thing done well
-9. One thing to watch or improve
-10. Brief look-ahead to next scheduled run"""
+3. HR/effort analysis — explicitly use HR drift % and Z2 time-in-zone. If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift and acknowledge heat in your read — same effort shows higher HR in heat, so don't call it lost fitness.
+4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
+5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
+6. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
+7. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
+8. Cadence & elevation note (if relevant)
+9. One thing done well
+10. One thing to watch or improve
+11. Brief look-ahead to next scheduled run"""
 
         response = self.client.messages.create(
             model=MODEL,

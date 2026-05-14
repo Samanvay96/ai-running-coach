@@ -23,6 +23,30 @@ from src.telegram_bot import send_coaching_message, send_error_alert, send_backu
 from src.backup import run_backup
 
 
+def extract_weather_fields(weather: dict | None) -> dict:
+    """Pull the fields we surface to the coach out of Garmin's weather payload.
+
+    Returns a dict with temp_c / apparent_temp_c / humidity_pct / wind_kph / label,
+    each None when the field isn't present. Garmin's keys vary slightly across
+    firmwares, so we try the common ones.
+    """
+    if not weather or not isinstance(weather, dict):
+        return {"temp_c": None, "apparent_temp_c": None, "humidity_pct": None,
+                "wind_kph": None, "label": None}
+    label = None
+    wt = weather.get("weatherTypeDTO")
+    if isinstance(wt, dict):
+        label = wt.get("desc") or wt.get("weatherTypeDesc")
+    label = label or weather.get("weatherTypeDesc")
+    return {
+        "temp_c": weather.get("temp"),
+        "apparent_temp_c": weather.get("apparentTemp"),
+        "humidity_pct": weather.get("relativeHumidity"),
+        "wind_kph": weather.get("windSpeed"),
+        "label": label,
+    }
+
+
 def poll():
     db = Database(DB_PATH)
     try:
@@ -55,9 +79,16 @@ def poll():
 
         log.info("New activity found: %s (ID: %s)", activity.get("activityName"), activity_id)
 
-        # Fetch splits + HR zones
+        # Fetch splits + HR zones + weather
         splits = garmin.get_activity_splits(activity_id)
         hr_zones = garmin.get_activity_hr_zones(activity_id)
+        # Weather may be absent (indoor / treadmill); never block the run on it.
+        try:
+            weather = garmin.get_activity_weather(activity_id)
+        except Exception as e:
+            log.warning("Weather fetch failed for %s: %s", activity_id, e)
+            weather = None
+        weather_fields = extract_weather_fields(weather)
 
         # Extract and store key metrics
         duration_seconds = activity.get("duration") or 0
@@ -75,6 +106,11 @@ def poll():
             or activity.get("trainingLoad")
             or (activity.get("summaryDTO") or {}).get("trainingLoad")
         )
+
+        # Post-run RPE + Feel come from the watch's "How did that feel?" prompt.
+        # RPE: 1-10 scale; Feel: 0-100 (Very Weak / Weak / Normal / Strong / Very Strong, step 25).
+        rpe = activity.get("directWorkoutRpe") or activity.get("workoutRpe")
+        feel = activity.get("directWorkoutFeel") or activity.get("workoutFeel")
 
         db.save_activity(
             activity_id=activity_id,
@@ -96,6 +132,14 @@ def poll():
             anaerobic_te=anaerobic_te,
             training_load=training_load,
             hr_zones_json=json.dumps(hr_zones) if hr_zones else None,
+            temp_c=weather_fields["temp_c"],
+            apparent_temp_c=weather_fields["apparent_temp_c"],
+            humidity_pct=weather_fields["humidity_pct"],
+            wind_kph=weather_fields["wind_kph"],
+            weather_label=weather_fields["label"],
+            weather_json=json.dumps(weather) if weather else None,
+            rpe=rpe,
+            feel=feel,
         )
 
         # Build activity dict for coach (matches what coach.analyze_run expects)
@@ -116,6 +160,13 @@ def poll():
             "splits_json": json.dumps(splits),
             "hr_zones_json": json.dumps(hr_zones) if hr_zones else None,
             "training_load": training_load,
+            "temp_c": weather_fields["temp_c"],
+            "apparent_temp_c": weather_fields["apparent_temp_c"],
+            "humidity_pct": weather_fields["humidity_pct"],
+            "wind_kph": weather_fields["wind_kph"],
+            "weather_label": weather_fields["label"],
+            "rpe": rpe,
+            "feel": feel,
         }
 
         try:

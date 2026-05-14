@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import anthropic
 
-from .config import RACE_DATE, PLAN_START_DATE, MAX_HR
+from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, today_local
 from .db import Database
 from .training_plan import TrainingPlan
 
@@ -154,8 +154,13 @@ def compute_hr_drift(splits_data) -> dict | None:
     }
 
 
-def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> float | None:
-    """Return % of run time spent in Zone 2.
+def compute_zone_distribution(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> dict | None:
+    """Return % time in Z1 / Z2 / Z3+ and combined easy (Z1+Z2).
+
+    For easy-run quality, "easy time" = Z1 + Z2 — Z1 (recovery) is *easier* than
+    Z2, so counting only Z2 against an 80% target is wrong (it penalises runs
+    that started slow). The breakdown also lets the model spot Z3+ creep on a
+    run that was prescribed easy.
 
     Prefers Garmin's `get_activity_hr_in_timezones` payload (zone-bucketed seconds);
     falls back to per-km splits with average HR if zones aren't available.
@@ -168,18 +173,27 @@ def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> floa
             zones = None
         if isinstance(zones, list) and zones:
             total = sum(z.get("secsInZone", 0) for z in zones if isinstance(z, dict))
-            # Garmin zones are 1-indexed; "zone 2" lands on zoneNumber=2
-            z2_secs = sum(
-                z.get("secsInZone", 0)
-                for z in zones
-                if isinstance(z, dict) and z.get("zoneNumber") == 2
-            )
             if total > 0:
-                return round(z2_secs / total * 100, 1)
+                def secs_for(n: int) -> float:
+                    return sum(
+                        z.get("secsInZone", 0)
+                        for z in zones
+                        if isinstance(z, dict) and z.get("zoneNumber") == n
+                    )
+                z1 = secs_for(1)
+                z2 = secs_for(2)
+                z3plus = total - z1 - z2
+                return {
+                    "z1_pct": round(z1 / total * 100, 1),
+                    "z2_pct": round(z2 / total * 100, 1),
+                    "z3plus_pct": round(max(z3plus, 0) / total * 100, 1),
+                    "easy_pct": round((z1 + z2) / total * 100, 1),
+                    "source": "garmin_zones",
+                }
 
     # Path 2: derive from per-km splits using absolute Z2 BPM bounds
     splits = _splits_list(splits_data)
-    in_zone = 0.0
+    z1_secs = z2_secs = z3_secs = 0.0
     total = 0.0
     for s in splits:
         if not isinstance(s, dict):
@@ -189,11 +203,21 @@ def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> floa
         if not hr or not dur:
             continue
         total += dur
-        if z2_min <= hr <= z2_max:
-            in_zone += dur
+        if hr < z2_min:
+            z1_secs += dur
+        elif hr <= z2_max:
+            z2_secs += dur
+        else:
+            z3_secs += dur
     if total == 0:
         return None
-    return round(in_zone / total * 100, 1)
+    return {
+        "z1_pct": round(z1_secs / total * 100, 1),
+        "z2_pct": round(z2_secs / total * 100, 1),
+        "z3plus_pct": round(z3_secs / total * 100, 1),
+        "easy_pct": round((z1_secs + z2_secs) / total * 100, 1),
+        "source": "splits_fallback",
+    }
 
 
 def compute_acr(db: Database, today: date) -> dict | None:
@@ -461,7 +485,8 @@ class Coach:
         self.db = db
 
     def _build_system_prompt(self) -> str:
-        week = self.plan.get_week_for_date(date.today())
+        today = today_local()
+        week = self.plan.get_week_for_date(today)
         week_info = (
             f"Week {week.week_number} ({week.phase}), {week.start_date} to {week.end_date}"
             if week else "Outside training plan period"
@@ -501,7 +526,7 @@ TRAINING PLAN:
 - Phases: Adaptation (wk 1-8), Base Building (wk 9-18), Specific Prep (wk 19-28), Taper (wk 29-32)
 - Running days: Tuesday, Thursday, Saturday (long run)
 - Cross-training: F45 Mon/Wed (reducing to 1x/week from Phase 2)
-- Current date: {date.today().isoformat()}
+- Runner timezone: {RUNNER_TIMEZONE} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
 - Current training week: {week_info}
 
 PACE ZONES:
@@ -566,16 +591,21 @@ COACHING STYLE:
             drift_text = "Run too short to compute meaningfully"
 
         z2_bounds = self.plan.get_z2_bounds(MAX_HR, rhr_for_zones)
-        z2_pct_text = "N/A"
+        zone_dist_text = "N/A"
         if z2_bounds:
-            z2_pct = compute_z2_pct(
+            dist = compute_zone_distribution(
                 activity.get("hr_zones_json"),
                 activity.get("splits_json", ""),
                 z2_bounds[0],
                 z2_bounds[1],
             )
-            if z2_pct is not None:
-                z2_pct_text = f"{z2_pct}% (target ≥80% on easy runs; Z2 = {z2_bounds[0]}-{z2_bounds[1]} bpm via %HRR)"
+            if dist is not None:
+                zone_dist_text = (
+                    f"Easy (Z1+Z2) {dist['easy_pct']}% (target ≥80% on easy runs) — "
+                    f"breakdown: Z1 {dist['z1_pct']}% | Z2 {dist['z2_pct']}% | "
+                    f"Z3+ {dist['z3plus_pct']}% "
+                    f"[Z2 band = {z2_bounds[0]}-{z2_bounds[1]} bpm via %HRR]"
+                )
 
         # Load context
         acr = compute_acr(self.db, run_date)
@@ -670,7 +700,7 @@ SUBJECTIVE EFFORT (from watch post-run prompt):
 
 RUN QUALITY:
 - HR Drift: {drift_text}
-- Z2 Time-in-Zone: {z2_pct_text}
+- Zone Distribution: {zone_dist_text}
 
 LOAD CONTEXT:
 - {acr_text}
@@ -699,7 +729,7 @@ RECENT TRAINING:
 Provide:
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
-3. HR/effort analysis — explicitly use HR drift % and Z2 time-in-zone. If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift and acknowledge heat in your read — same effort shows higher HR in heat, so don't call it lost fitness.
+3. HR/effort analysis — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
 4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
 5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
 6. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
@@ -726,7 +756,7 @@ Provide:
         return _extract_text(response)
 
     def _race_countdown(self) -> dict:
-        today = date.today()
+        today = today_local()
         days_remaining = (RACE_DATE - today).days
         total_weeks = 32
         elapsed_weeks = (today - PLAN_START_DATE).days / 7
@@ -866,7 +896,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
         """Handle interactive conversation via Telegram."""
         history = self.db.get_recent_conversations(limit=10)
         recent_runs = self.db.get_recent_activities(limit=5)
-        today = date.today()
+        today = today_local()
 
         messages = [{"role": h["role"], "content": h["content"]} for h in history]
 

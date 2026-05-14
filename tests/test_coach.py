@@ -19,6 +19,7 @@ from src.coach import (
     _extract_text,
     compute_zone_distribution,
     format_feel,
+    format_recovery,
     format_weather,
     heat_note,
     resolve_runner_today,
@@ -226,6 +227,49 @@ def test_zone_distribution_splits_fallback_buckets_by_hr():
 def test_zone_distribution_handles_empty():
     assert compute_zone_distribution(None, None, 134, 148) is None
     assert compute_zone_distribution(None, [], 134, 148) is None
+
+
+# ---------------- format_recovery staleness ----------------
+
+
+def test_format_recovery_quiet_when_data_is_fresh():
+    """Yesterday's wellness data is fresh — Garmin records sleep after waking."""
+    today = date(2026, 5, 14)
+    wellness = {
+        "date": "2026-05-13",
+        "sleep_seconds": 7 * 3600,
+        "hrv_last_night": 55,
+    }
+    out = format_recovery(wellness, today)
+    assert "stale" not in out.lower()
+    assert "7.0h" in out
+
+
+def test_format_recovery_flags_stale_data():
+    """Wellness 3 days old should be flagged so the model discounts it."""
+    today = date(2026, 5, 14)
+    wellness = {
+        "date": "2026-05-11",
+        "sleep_seconds": 5 * 3600,
+        "hrv_last_night": 40,
+    }
+    out = format_recovery(wellness, today)
+    assert "stale" in out.lower()
+    assert "3 days" in out
+
+
+def test_format_recovery_without_today_skips_staleness_check():
+    """Backwards compat — older callers without `today` arg don't trip the check."""
+    wellness = {"date": "2026-05-01", "sleep_seconds": 7 * 3600}
+    out = format_recovery(wellness)  # no today arg
+    assert "stale" not in out.lower()
+
+
+def test_format_recovery_handles_missing_date():
+    """A wellness row without a `date` key must not crash."""
+    wellness = {"sleep_seconds": 7 * 3600, "hrv_last_night": 55}
+    out = format_recovery(wellness, date(2026, 5, 14))
+    assert "stale" not in out.lower()
 
 
 # ---------------- runner timezone resolver ----------------

@@ -14,7 +14,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.coach import Coach, _extract_text, format_feel, format_weather, heat_note
+from src.coach import (
+    Coach,
+    _extract_text,
+    compute_zone_distribution,
+    format_feel,
+    format_weather,
+    heat_note,
+)
 from src.config import DB_PATH, TRAINING_PLAN_PATH
 from src.db import Database
 from src.training_plan import TrainingPlan
@@ -175,6 +182,49 @@ def test_heat_note_fires_for_warm_and_humid():
 
 def test_heat_note_quiet_in_cool_conditions():
     assert heat_note({"temp_c": 12, "humidity_pct": 60}) == ""
+
+
+# ---------------- zone distribution ----------------
+
+
+def test_zone_distribution_counts_z1_and_z2_as_easy():
+    """The original bug: Z2=73%, Z1=10% → coach said "missed 80% easy target".
+    Both should count toward easy time."""
+    zones = [
+        {"zoneNumber": 1, "secsInZone": 100},
+        {"zoneNumber": 2, "secsInZone": 737},
+        {"zoneNumber": 3, "secsInZone": 163},
+        {"zoneNumber": 4, "secsInZone": 0},
+        {"zoneNumber": 5, "secsInZone": 0},
+    ]
+    import json as _json
+    dist = compute_zone_distribution(_json.dumps(zones), None, 134, 148)
+    assert dist is not None
+    assert dist["z1_pct"] == 10.0
+    assert dist["z2_pct"] == 73.7
+    assert dist["easy_pct"] == 83.7
+    assert dist["easy_pct"] >= 80, "Z1+Z2 should clear the 80% easy threshold"
+
+
+def test_zone_distribution_splits_fallback_buckets_by_hr():
+    """When Garmin zones aren't available, split HR is bucketed by Z2 bounds."""
+    splits = [
+        {"averageHR": 120, "duration": 300},  # below Z2_min → Z1
+        {"averageHR": 140, "duration": 300},  # in Z2
+        {"averageHR": 160, "duration": 300},  # above Z2_max → Z3+
+    ]
+    dist = compute_zone_distribution(None, splits, 134, 148)
+    assert dist is not None
+    assert dist["z1_pct"] == pytest.approx(33.3, abs=0.5)
+    assert dist["z2_pct"] == pytest.approx(33.3, abs=0.5)
+    assert dist["z3plus_pct"] == pytest.approx(33.3, abs=0.5)
+    assert dist["easy_pct"] == pytest.approx(66.7, abs=0.5)
+    assert dist["source"] == "splits_fallback"
+
+
+def test_zone_distribution_handles_empty():
+    assert compute_zone_distribution(None, None, 134, 148) is None
+    assert compute_zone_distribution(None, [], 134, 148) is None
 
 
 def test_analyze_run_prompt_includes_conditions_and_subjective(coach):

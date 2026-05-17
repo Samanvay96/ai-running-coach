@@ -52,9 +52,9 @@ def test_check_heartbeat_fires_when_stale(db):
     assert "hasn't completed" in alert.message
 
 
-def test_heartbeat_threshold_catches_three_missed_polls():
-    """Sanity: 6h threshold is exactly 3 missed 2-hourly polls."""
-    assert HEARTBEAT_STALE_HOURS == 6
+def test_heartbeat_threshold_catches_four_missed_polls():
+    """Sanity: 4h threshold is exactly 4 missed hourly polls."""
+    assert HEARTBEAT_STALE_HOURS == 4
 
 
 # ---------------- mark_poll_completed plumbing ----------------

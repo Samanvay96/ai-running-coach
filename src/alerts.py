@@ -20,7 +20,7 @@ from statistics import mean
 from .config import DB_PATH
 from .db import Database
 
-HEARTBEAT_STALE_HOURS = 6  # 3 missed polls (poller fires every 2h)
+HEARTBEAT_STALE_HOURS = 4  # 4 missed polls (poller fires every 1h)
 
 log = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ def check_heartbeat(db: Database) -> Alert | None:
             kind="poller_stalled",
             severity="high",
             message=(
-                f"🚨 Poller hasn't completed in {age_hours:.1f}h (expected ≤2h). "
+                f"🚨 Poller hasn't completed in {age_hours:.1f}h (expected ≤1h). "
                 f"Last success: {last.isoformat(timespec='minutes')}. "
                 f"Check `journalctl -u ai-coach-poll -e` and `systemctl status "
                 f"ai-coach-poll.timer`."

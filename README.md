@@ -4,13 +4,13 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 
 ## ✨ What it does
 
-- 📡 **Monitors Garmin Connect** for new running activities (polls every 2 hours)
+- 📡 **Monitors Garmin Connect** for new running activities (polls every hour)
 - 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, splits, weather, and the RPE / Feel score you logged on the watch
 - 💬 **Sends coaching feedback** to Telegram automatically after each detected run (rendered with proper bold sections, no leaked markdown asterisks)
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
 - ☀️ **Morning brief** — 06:00 runner-local on prescribed-run days, you get a stick / modify / postpone call based on overnight wellness and load before you even decide what to wear
 - 🌍 **Travel-aware** — auto-derives your current timezone from your latest activity's UTC offset, so "today" in every analysis matches what your watch shows, not the Pi's clock
-- 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt, *and a poller heartbeat* that fires if the service has stalled >6h; nudges you *before* you overdo it
+- 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt, *and a poller heartbeat* that fires if the service has stalled >4h; nudges you *before* you overdo it
 - ⚠️ **Failure alerts** — if a run analysis fails to generate or deliver, the poller surfaces the exception (with type and `stop_reason`) to Telegram so you notice in seconds, not the next time you check the journal
 - ☁️ **Auto off-Pi backups** — every new run triggers a fresh DB backup that's sent to Telegram, so your training history survives an SD card failure
 - ⌨️ **Telegram commands**:
@@ -49,7 +49,7 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 Four scheduled jobs + one always-on bot, all running under systemd on a Raspberry Pi:
 
 ```
-Garmin Connect ──(every 2h)──> Poller ──(new run?)──> LLM Analysis ──> Telegram
+Garmin Connect ──(every 1h)──> Poller ──(new run?)──> LLM Analysis ──> Telegram
                                   │                        ↑
                                   ├── SQLite ←── Training Plan (Excel)
                                   ├── Daily wellness (sleep / HRV / RHR)
@@ -133,7 +133,7 @@ This creates a virtual environment, installs dependencies, and installs systemd 
 
 ```bash
 sudo systemctl start ai-coach-bot              # 🤖 Telegram bot (always-on)
-sudo systemctl start ai-coach-poll.timer       # 📡 Garmin poller (every 2h)
+sudo systemctl start ai-coach-poll.timer       # 📡 Garmin poller (every 1h)
 sudo systemctl enable --now ai-coach-backup.timer ai-coach-alerts.timer ai-coach-prerun.timer
                                                 # 💾 Daily 02:00 backup, 08:00 wellness alerts,
                                                 #    hourly pre-run gate (fires at runner-local 06:00)
@@ -210,7 +210,7 @@ you):
 | RHR creep | last 3 nights avg ≥ prior 11-night baseline + 5 bpm | Classic overreach / illness-brewing signal |
 | HRV drop | 3 nights all `UNBALANCED` OR ≥15% below 7-day avg | Confirms autonomic stress |
 | Sleep debt | 3-night avg < 6.5h | Below recovery threshold; hard runs will compound damage |
-| Poller heartbeat | no successful poll completion in ≥6h (3 missed polls) | Catches silent service failures — expired Garmin tokens, network loss, stalled timer — that today would only surface as missing analyses. Bypasses the 3-day cooldown so it re-fires daily until fixed |
+| Poller heartbeat | no successful poll completion in ≥4h (4 missed polls) | Catches silent service failures — expired Garmin tokens, network loss, stalled timer — that today would only surface as missing analyses. Bypasses the 3-day cooldown so it re-fires daily until fixed |
 
 ## 💾 Backup behaviour
 

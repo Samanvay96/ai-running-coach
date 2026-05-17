@@ -53,10 +53,20 @@ class TrainingWeek:
     phase: str
     monday: PrescribedRun
     tuesday: PrescribedRun
+    wednesday: PrescribedRun
     thursday: PrescribedRun
+    friday: PrescribedRun
     saturday: PrescribedRun
+    sunday: PrescribedRun
     weekly_km_target: float
     notes: str
+
+    def day(self, weekday: int) -> PrescribedRun:
+        """Return the prescribed slot for a Python weekday (0=Mon ... 6=Sun)."""
+        return (
+            self.monday, self.tuesday, self.wednesday, self.thursday,
+            self.friday, self.saturday, self.sunday,
+        )[weekday]
 
 
 class TrainingPlan:
@@ -79,7 +89,9 @@ class TrainingPlan:
         self.fueling = []
         self._parse_training_sheet(wb["Training Plan"])
         self._parse_pace_guide(wb["Pace Guide"])
-        self._parse_race_day(wb["Race Day"])
+        if "Benchmarks" in wb.sheetnames:
+            self._parse_benchmarks(wb["Benchmarks"])
+        self._parse_race_day(wb["Race Day Plan"])
         self._mtime = Path(path).stat().st_mtime
 
     def reload_if_changed(self) -> bool:
@@ -97,9 +109,14 @@ class TrainingPlan:
         plan_start_fallback = date(2026, 3, 2)
         for row in ws.iter_rows(min_row=5, max_row=ws.max_row, values_only=False):
             week_val = row[0].value  # Column A
-            if not isinstance(week_val, (int, float)):
-                continue  # Skip phase header rows
-            week_num = int(week_val)
+            # v5 stores week numbers as strings ('1', '2', ...); older versions
+            # used ints. Accept either; non-numeric cells are phase headers.
+            if isinstance(week_val, (int, float)):
+                week_num = int(week_val)
+            elif isinstance(week_val, str) and week_val.strip().isdigit():
+                week_num = int(week_val.strip())
+            else:
+                continue  # Phase header / blank row
             dates_str = str(row[1].value or "")
             parsed = self._parse_date_range(dates_str, year=plan_start_fallback.year)
             if parsed:
@@ -108,6 +125,10 @@ class TrainingPlan:
                 week_start = plan_start_fallback + timedelta(weeks=week_num - 1)
                 week_end = week_start + timedelta(days=6)
 
+            # v5 layout: columns 3-9 are Mon..Sun (all 7 days listed); column
+            # 10 is the weekly km target; column 19 is notes. Run/strength/rest
+            # can fall on any day, so strict=True on every slot — anything
+            # without an explicit km figure parses as rest.
             self.weeks.append(TrainingWeek(
                 week_number=week_num,
                 dates=dates_str,
@@ -115,11 +136,14 @@ class TrainingPlan:
                 end_date=week_end,
                 phase=str(row[2].value or ""),
                 monday=self._parse_run_cell(str(row[3].value or ""), "monday", strict=True),
-                tuesday=self._parse_run_cell(str(row[4].value or ""), "tuesday"),
-                thursday=self._parse_run_cell(str(row[5].value or ""), "thursday"),
-                saturday=self._parse_run_cell(str(row[6].value or ""), "saturday"),
-                weekly_km_target=float(row[7].value or 0),
-                notes=str(row[8].value or ""),
+                tuesday=self._parse_run_cell(str(row[4].value or ""), "tuesday", strict=True),
+                wednesday=self._parse_run_cell(str(row[5].value or ""), "wednesday", strict=True),
+                thursday=self._parse_run_cell(str(row[6].value or ""), "thursday", strict=True),
+                friday=self._parse_run_cell(str(row[7].value or ""), "friday", strict=True),
+                saturday=self._parse_run_cell(str(row[8].value or ""), "saturday", strict=True),
+                sunday=self._parse_run_cell(str(row[9].value or ""), "sunday", strict=True),
+                weekly_km_target=float(row[10].value or 0),
+                notes=str(row[19].value or ""),
             ))
 
     def _parse_run_cell(self, text: str, day: str, strict: bool = False) -> PrescribedRun:
@@ -128,9 +152,16 @@ class TrainingPlan:
 
         text_lower = text.lower()
 
-        # Race day
-        if "race day" in text_lower:
-            return PrescribedRun("race", 42.2, "5:40/km", text)
+        # Race day — the v5 plan flags races with the 🏁 emoji and/or
+        # "MARATHON"/"HALF" in the cell (and may omit a km figure on the
+        # Lisbon cell). Detect any of those so race day doesn't fall through
+        # to rest under strict mode.
+        if "🏁" in text or "race day" in text_lower or "marathon" in text_lower or "half" in text_lower:
+            dist = self._extract_distance(text)
+            if dist == 0:
+                # Default: full marathon unless the cell says "half"
+                dist = 21.1 if "half" in text_lower else 42.2
+            return PrescribedRun("race", dist, "5:40/km", text)
 
         # Shakeout
         if "shakeout" in text_lower:
@@ -230,24 +261,33 @@ class TrainingPlan:
         return ""
 
     def _parse_pace_guide(self, ws):
-        # Rows 3-7: pace zones
-        for row in ws.iter_rows(min_row=3, max_row=7, values_only=True):
-            if row[0]:
-                self.pace_zones.append(PaceZone(
-                    run_type=str(row[0]),
-                    pace=str(row[1] or ""),
-                    hr_zone=str(row[2] or ""),
-                    feel=str(row[3] or ""),
-                ))
-        # Rows 12-14: benchmarks
-        for row in ws.iter_rows(min_row=12, max_row=14, values_only=True):
-            if row[0]:
-                self.benchmarks.append(Benchmark(
-                    distance=str(row[0]),
-                    target_time=str(row[1] or ""),
-                    target_pace=str(row[2] or ""),
-                    when_to_test=str(row[3] or ""),
-                ))
+        # Pace zones live in a contiguous block under the header row.
+        # v5 grew this from 5 zones (E/MP/T/I/S) to 7 (adds Hill Reps, Strides);
+        # walk until the first blank row to stay robust to future tweaks.
+        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True):
+            run_type = row[0] if len(row) > 0 else None
+            if not run_type:
+                break
+            self.pace_zones.append(PaceZone(
+                run_type=str(run_type),
+                pace=str(row[1] or "") if len(row) > 1 else "",
+                hr_zone=str(row[2] or "") if len(row) > 2 else "",
+                feel=str(row[3] or "") if len(row) > 3 else "",
+            ))
+
+    def _parse_benchmarks(self, ws):
+        # v5 moved benchmarks to their own sheet. Header is row 3, entries
+        # start at row 4. Walk until the first blank row.
+        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True):
+            distance = row[0] if len(row) > 0 else None
+            if not distance:
+                break
+            self.benchmarks.append(Benchmark(
+                distance=str(distance),
+                target_time=str(row[1] or "") if len(row) > 1 else "",
+                target_pace=str(row[2] or "") if len(row) > 2 else "",
+                when_to_test=str(row[3] or "") if len(row) > 3 else "",
+            ))
 
     def _parse_race_day(self, ws):
         # Rows 3-11: race splits
@@ -277,19 +317,14 @@ class TrainingPlan:
         week = self.get_week_for_date(d)
         if not week:
             return None
-        weekday = d.weekday()  # 0=Mon, 1=Tue, ...
-        if weekday == 0:
-            return week.monday if week.monday.workout_type != "rest" else None
-        if weekday == 1:
-            return week.tuesday
-        elif weekday == 3:
-            return week.thursday
-        elif weekday == 5:
-            return week.saturday
-        return None  # Rest/cross-training day
+        slot = week.day(d.weekday())
+        return slot if slot.workout_type != "rest" else None
+
+    _DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
     def get_plan_summary(self) -> str:
-        lines = ["32-week sub-4:00 Lisbon Marathon plan (Oct 10, 2026)", ""]
+        total = len(self.weeks)
+        lines = [f"{total}-week sub-4:00 Lisbon Marathon plan (Oct 10, 2026)", ""]
         lines.append("PACE ZONES:")
         for pz in self.pace_zones:
             lines.append(f"  {pz.run_type}: {pz.pace} | {pz.hr_zone} | {pz.feel}")
@@ -300,22 +335,23 @@ class TrainingPlan:
         lines.append("")
         lines.append("WEEKS:")
         for w in self.weeks:
+            run_days = [
+                f"{label}={w.day(i).description}"
+                for i, label in enumerate(self._DAY_LABELS)
+                if w.day(i).workout_type != "rest"
+            ]
             lines.append(
                 f"  Wk {w.week_number} ({w.phase}): "
-                f"Tue={w.tuesday.description} | "
-                f"Thu={w.thursday.description} | "
-                f"Sat={w.saturday.description} | "
-                f"Target={w.weekly_km_target}km"
+                + " | ".join(run_days)
+                + f" | Target={w.weekly_km_target}km"
             )
         return "\n".join(lines)
 
     def get_week_summary(self, week: TrainingWeek) -> str:
-        return (
-            f"Week {week.week_number} ({week.phase}) — {week.dates}\n"
-            f"Mon: {week.monday.description}\n"
-            f"Tue: {week.tuesday.description}\n"
-            f"Thu: {week.thursday.description}\n"
-            f"Sat: {week.saturday.description}\n"
-            f"Target: {week.weekly_km_target} km\n"
-            f"Notes: {week.notes}"
-        )
+        lines = [f"Week {week.week_number} ({week.phase}) — {week.dates}"]
+        for i, label in enumerate(self._DAY_LABELS):
+            lines.append(f"{label}: {week.day(i).description}")
+        lines.append(f"Target: {week.weekly_km_target} km")
+        if week.notes:
+            lines.append(f"Notes: {week.notes}")
+        return "\n".join(lines)

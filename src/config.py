@@ -9,7 +9,7 @@ load_dotenv()
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-TRAINING_PLAN_PATH = PROJECT_ROOT / "Lisbon Marathon Sub4 Plan.xlsx"
+TRAINING_PLAN_PATH = PROJECT_ROOT / "Lisbon_Marathon_Sub4_Plan_v5.xlsx"
 DB_PATH = PROJECT_ROOT / "data" / "coach.db"
 
 # API keys and credentials

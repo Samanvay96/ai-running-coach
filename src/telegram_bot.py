@@ -174,30 +174,33 @@ class CoachBot:
         if prescribed:
             msg = (
                 f"**Week {week.week_number} ({week.phase})** — {today.strftime('%A, %b %d')}\n\n"
-                f"**Today's workout:**\n{prescribed.description}\n\n"
-                f"**Notes:** {week.notes}"
+                f"**Today's workout:**\n{prescribed.description}"
             )
-        else:
-            if week:
-                # Show what's coming next
-                next_runs = []
-                if today.weekday() < 1:
-                    next_runs.append(f"Tue: {week.tuesday.description}")
-                if today.weekday() < 3:
-                    next_runs.append(f"Thu: {week.thursday.description}")
-                if today.weekday() < 5:
-                    next_runs.append(f"Sat: {week.saturday.description}")
+            if week.notes:
+                msg += f"\n\n**Notes:** {week.notes}"
+        elif week:
+            day_labels = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+            today_slot = week.day(today.weekday())
+            next_runs = [
+                f"{day_labels[i]}: {week.day(i).description}"
+                for i in range(today.weekday() + 1, 7)
+                if week.day(i).workout_type != "rest"
+            ]
 
-                msg = f"**Week {week.week_number} ({week.phase})** — {today.strftime('%A, %b %d')}\n\n"
-                msg += "No run today — rest up!\n\n"
-                if today.weekday() == 0:
-                    msg += f"**Cross-training:** {week.monday.description}\n\n"
-                if next_runs:
-                    msg += "**Coming up:**\n" + "\n".join(next_runs)
-                else:
-                    msg += "You've finished this week's runs. Recover well!"
+            msg = f"**Week {week.week_number} ({week.phase})** — {today.strftime('%A, %b %d')}\n\n"
+            # Show today's non-running prescription verbatim (e.g. strength,
+            # travel, planned rest) — surfacing it is more useful than a
+            # generic "rest up" string.
+            if today_slot.description and today_slot.description.lower() != "rest":
+                msg += f"**Today:** {today_slot.description}\n\n"
             else:
-                msg = "You're outside the training plan period."
+                msg += "No run today — rest up!\n\n"
+            if next_runs:
+                msg += "**Coming up:**\n" + "\n".join(next_runs)
+            else:
+                msg += "You've finished this week's runs. Recover well!"
+        else:
+            msg = "You're outside the training plan period."
         await _reply(update, msg)
 
     async def cmd_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

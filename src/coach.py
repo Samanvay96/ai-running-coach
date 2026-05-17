@@ -575,13 +575,12 @@ class Coach:
         else:
             z2_line = ""
 
+        total_plan_weeks = len(self.plan.weeks)
         return f"""You are a knowledgeable and encouraging running coach for a runner training for the Lisbon Marathon on October 10, 2026, targeting a sub-4:00 finish (3:57:57).
 
 TRAINING PLAN:
-- 32-week plan starting March 2, 2026
-- Phases: Adaptation (wk 1-8), Base Building (wk 9-18), Specific Prep (wk 19-28), Taper (wk 29-32)
-- Running days: Tuesday, Thursday, Saturday (long run)
-- Cross-training: F45 Mon/Wed (reducing to 1x/week from Phase 2)
+- {total_plan_weeks}-week plan (v5), phases: Adaptation → Restart → Base Building → Specific Prep → Taper.
+- Runs, rest days, and strength sessions vary by week — always check the prescribed cell for the day rather than assuming a fixed weekly pattern.
 - Runner timezone: {tz_label} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
 - Current training week: {week_info}
 
@@ -814,10 +813,17 @@ Provide:
     def _race_countdown(self) -> dict:
         today, _ = resolve_runner_today(self.db)
         days_remaining = (RACE_DATE - today).days
-        total_weeks = 32
-        elapsed_weeks = (today - PLAN_START_DATE).days / 7
-        current_week = min(max(int(elapsed_weeks) + 1, 1), total_weeks)
-        pct_complete = min(elapsed_weeks / total_weeks * 100, 100)
+        total_weeks = len(self.plan.weeks) or 1
+        # Prefer the plan's own week numbering when today is in-plan; that way
+        # "Week N/M" lines up with the xlsx even across non-uniform gaps (e.g.
+        # the 3-week time-off span between Wk5 and Wk6 in v5).
+        plan_week = self.plan.get_week_for_date(today)
+        if plan_week:
+            current_week = plan_week.week_number
+        else:
+            elapsed_weeks = (today - PLAN_START_DATE).days / 7
+            current_week = min(max(int(elapsed_weeks) + 1, 1), total_weeks)
+        pct_complete = min(current_week / total_weeks * 100, 100)
         weeks_remaining = max((RACE_DATE - today).days / 7, 0)
         return {
             "days_remaining": days_remaining,

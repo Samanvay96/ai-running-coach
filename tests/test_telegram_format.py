@@ -37,11 +37,19 @@ def _import_format(monkeypatch=None):
         ("ANTHROPIC_API_KEY", "x"), ("RUNNER_AGE", "30"),
     ]:
         os.environ.setdefault(var, val)
-    for name in ["anthropic", "openpyxl", "dotenv"]:
-        m = types.ModuleType(name); sys.modules.setdefault(name, m)
-    sys.modules["anthropic"].Anthropic = type("A", (), {"__init__": lambda self, **kw: None})
-    sys.modules["openpyxl"].load_workbook = lambda *a, **kw: None
-    sys.modules["dotenv"].load_dotenv = lambda *a, **kw: None
+    # Stub anthropic / openpyxl / dotenv ONLY if they're not already installed.
+    # Previously this unconditionally overwrote `openpyxl.load_workbook` etc. on
+    # the real module, which silently broke any later test (e.g. test_coach)
+    # that actually tried to load the xlsx.
+    stubs = [
+        ("anthropic", "Anthropic", type("A", (), {"__init__": lambda self, **kw: None})),
+        ("openpyxl", "load_workbook", lambda *a, **kw: None),
+        ("dotenv", "load_dotenv", lambda *a, **kw: None),
+    ]
+    for name, attr, val in stubs:
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
+            setattr(sys.modules[name], attr, val)
 
     from src.telegram_bot import format_for_telegram
     return format_for_telegram

@@ -1,11 +1,12 @@
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import anthropic
 
-from .config import RACE_DATE, PLAN_START_DATE, MAX_HR
+from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, RUNNER_TZ
 from .db import Database
+from .time_utils import format_utc_offset
 from .training_plan import TrainingPlan
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,30 @@ def _extract_text(response) -> str:
         f"blocks={block_types}, usage={usage}). "
         f"Likely cause: max_tokens hit during thinking — increase max_tokens."
     )
+
+
+def resolve_runner_today(db: Database, within_days: int = 14) -> tuple[date, str]:
+    """Return (today, source_label) for the runner's current timezone.
+
+    Priority:
+      1. Most recent activity's UTC offset (within `within_days`) — auto-tracks
+         travel without the user having to update env.
+      2. RUNNER_TIMEZONE env var — fallback for new installs or long gaps
+         between runs.
+      3. UTC — last resort if neither signal is available.
+
+    source_label is for the system prompt so the model sees what 'today'
+    is based on and we can spot when a stale offset is leaking in.
+    """
+    offset = db.get_latest_tz_offset_minutes(within_days=within_days)
+    if offset is not None:
+        tz = timezone(timedelta(minutes=offset))
+        today = datetime.now(tz).date()
+        return today, f"UTC{format_utc_offset(offset)} (auto-derived from latest run)"
+    today = datetime.now(RUNNER_TZ).date()
+    if RUNNER_TIMEZONE == "UTC":
+        return today, "UTC (no recent run, RUNNER_TIMEZONE unset)"
+    return today, f"{RUNNER_TIMEZONE} (from RUNNER_TIMEZONE env var)"
 
 
 def format_pace(speed_mps: float) -> str:
@@ -154,8 +179,13 @@ def compute_hr_drift(splits_data) -> dict | None:
     }
 
 
-def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> float | None:
-    """Return % of run time spent in Zone 2.
+def compute_zone_distribution(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> dict | None:
+    """Return % time in Z1 / Z2 / Z3+ and combined easy (Z1+Z2).
+
+    For easy-run quality, "easy time" = Z1 + Z2 — Z1 (recovery) is *easier* than
+    Z2, so counting only Z2 against an 80% target is wrong (it penalises runs
+    that started slow). The breakdown also lets the model spot Z3+ creep on a
+    run that was prescribed easy.
 
     Prefers Garmin's `get_activity_hr_in_timezones` payload (zone-bucketed seconds);
     falls back to per-km splits with average HR if zones aren't available.
@@ -168,18 +198,27 @@ def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> floa
             zones = None
         if isinstance(zones, list) and zones:
             total = sum(z.get("secsInZone", 0) for z in zones if isinstance(z, dict))
-            # Garmin zones are 1-indexed; "zone 2" lands on zoneNumber=2
-            z2_secs = sum(
-                z.get("secsInZone", 0)
-                for z in zones
-                if isinstance(z, dict) and z.get("zoneNumber") == 2
-            )
             if total > 0:
-                return round(z2_secs / total * 100, 1)
+                def secs_for(n: int) -> float:
+                    return sum(
+                        z.get("secsInZone", 0)
+                        for z in zones
+                        if isinstance(z, dict) and z.get("zoneNumber") == n
+                    )
+                z1 = secs_for(1)
+                z2 = secs_for(2)
+                z3plus = total - z1 - z2
+                return {
+                    "z1_pct": round(z1 / total * 100, 1),
+                    "z2_pct": round(z2 / total * 100, 1),
+                    "z3plus_pct": round(max(z3plus, 0) / total * 100, 1),
+                    "easy_pct": round((z1 + z2) / total * 100, 1),
+                    "source": "garmin_zones",
+                }
 
     # Path 2: derive from per-km splits using absolute Z2 BPM bounds
     splits = _splits_list(splits_data)
-    in_zone = 0.0
+    z1_secs = z2_secs = z3_secs = 0.0
     total = 0.0
     for s in splits:
         if not isinstance(s, dict):
@@ -189,11 +228,21 @@ def compute_z2_pct(hr_zones_json, splits_data, z2_min: int, z2_max: int) -> floa
         if not hr or not dur:
             continue
         total += dur
-        if z2_min <= hr <= z2_max:
-            in_zone += dur
+        if hr < z2_min:
+            z1_secs += dur
+        elif hr <= z2_max:
+            z2_secs += dur
+        else:
+            z3_secs += dur
     if total == 0:
         return None
-    return round(in_zone / total * 100, 1)
+    return {
+        "z1_pct": round(z1_secs / total * 100, 1),
+        "z2_pct": round(z2_secs / total * 100, 1),
+        "z3plus_pct": round(z3_secs / total * 100, 1),
+        "easy_pct": round((z1_secs + z2_secs) / total * 100, 1),
+        "source": "splits_fallback",
+    }
 
 
 def compute_acr(db: Database, today: date) -> dict | None:
@@ -358,7 +407,88 @@ def format_upcoming_runs(plan: TrainingPlan, today: date, days: int = 3) -> str:
     return "\n".join(lines) if lines else "No upcoming prescription"
 
 
-def format_recovery(wellness: dict | None) -> str:
+_FEEL_LABELS = {
+    0: "Very Weak",
+    25: "Weak",
+    50: "Normal",
+    75: "Strong",
+    100: "Very Strong",
+}
+
+
+def format_feel(feel: int | float | None) -> str | None:
+    """Map Garmin's 0–100 feel score (step 25) to its on-watch label."""
+    if feel is None:
+        return None
+    try:
+        f = int(round(float(feel) / 25.0) * 25)
+    except (TypeError, ValueError):
+        return None
+    return _FEEL_LABELS.get(f, f"Score {feel}")
+
+
+def format_weather(activity: dict) -> str:
+    """One-line weather summary for the prompt. Returns 'Not recorded' for indoor runs."""
+    temp = activity.get("temp_c")
+    if temp is None and not activity.get("weather_label"):
+        return "Not recorded (likely indoor / treadmill)"
+    parts: list[str] = []
+    if temp is not None:
+        try:
+            parts.append(f"{float(temp):.0f}°C")
+        except (TypeError, ValueError):
+            pass
+    apparent = activity.get("apparent_temp_c")
+    if apparent is not None:
+        try:
+            ap = float(apparent)
+            # Skip if it's identical to actual temp — adds no signal
+            if temp is None or abs(ap - float(temp)) >= 1:
+                parts.append(f"feels {ap:.0f}°C")
+        except (TypeError, ValueError):
+            pass
+    humidity = activity.get("humidity_pct")
+    if humidity is not None:
+        try:
+            parts.append(f"{float(humidity):.0f}% humidity")
+        except (TypeError, ValueError):
+            pass
+    wind = activity.get("wind_kph")
+    if wind is not None:
+        try:
+            parts.append(f"wind {float(wind):.0f} kph")
+        except (TypeError, ValueError):
+            pass
+    label = activity.get("weather_label")
+    if label:
+        parts.append(str(label))
+    return " | ".join(parts) if parts else "Not recorded"
+
+
+def heat_note(activity: dict) -> str:
+    """Inline cue for the model when conditions distort HR-based reads."""
+    temp = activity.get("temp_c")
+    humidity = activity.get("humidity_pct")
+    try:
+        t = float(temp) if temp is not None else None
+        h = float(humidity) if humidity is not None else None
+    except (TypeError, ValueError):
+        return ""
+    if t is not None and t >= 25:
+        return " — heat-adjusted read: discount HR drift, expect higher HR at same effort"
+    if t is not None and t >= 20 and h is not None and h >= 70:
+        return " — warm + humid: discount some HR drift"
+    return ""
+
+
+def format_recovery(wellness: dict | None, today: date | None = None) -> str:
+    """Format the latest wellness row for the coach prompt.
+
+    When `today` is given and the wellness row is >1 day behind, an explicit
+    staleness flag is appended so the model knows to discount it — without
+    that signal it would anchor on potentially-irrelevant HRV / sleep readings
+    from a missed watch night.
+    """
     if not wellness:
         return "No recent wellness data"
     parts = []
@@ -377,7 +507,31 @@ def format_recovery(wellness: dict | None) -> str:
                 parts[-1] += ")"
     if wellness.get("rhr") is not None:
         parts.append(f"RHR: {wellness['rhr']} bpm")
-    return " | ".join(parts) if parts else "No recent wellness data"
+
+    if not parts:
+        return "No recent wellness data"
+
+    staleness = _wellness_staleness(wellness, today)
+    if staleness:
+        parts.append(staleness)
+    return " | ".join(parts)
+
+
+def _wellness_staleness(wellness: dict, today: date | None) -> str | None:
+    """Return a '(stale, N days old)' tag when the wellness row is >1 day behind today."""
+    if today is None:
+        return None
+    raw = wellness.get("date")
+    if not raw:
+        return None
+    try:
+        wellness_date = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+    age = (today - wellness_date).days
+    if age <= 1:  # yesterday's data is fresh — Garmin records sleep after waking
+        return None
+    return f"⚠️ stale: {age} days old — discount weight if today's state feels different"
 
 
 class Coach:
@@ -387,7 +541,8 @@ class Coach:
         self.db = db
 
     def _build_system_prompt(self) -> str:
-        week = self.plan.get_week_for_date(date.today())
+        today, tz_label = resolve_runner_today(self.db)
+        week = self.plan.get_week_for_date(today)
         week_info = (
             f"Week {week.week_number} ({week.phase}), {week.start_date} to {week.end_date}"
             if week else "Outside training plan period"
@@ -427,7 +582,7 @@ TRAINING PLAN:
 - Phases: Adaptation (wk 1-8), Base Building (wk 9-18), Specific Prep (wk 19-28), Taper (wk 29-32)
 - Running days: Tuesday, Thursday, Saturday (long run)
 - Cross-training: F45 Mon/Wed (reducing to 1x/week from Phase 2)
-- Current date: {date.today().isoformat()}
+- Runner timezone: {tz_label} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
 - Current training week: {week_info}
 
 PACE ZONES:
@@ -476,7 +631,7 @@ COACHING STYLE:
 
         # Recovery & readiness from latest wellness row
         latest_wellness = self.db.get_latest_wellness()
-        recovery_text = format_recovery(latest_wellness)
+        recovery_text = format_recovery(latest_wellness, run_date)
         rhr_for_zones = latest_wellness.get("rhr") if latest_wellness else None
 
         # Run-quality metrics
@@ -492,16 +647,21 @@ COACHING STYLE:
             drift_text = "Run too short to compute meaningfully"
 
         z2_bounds = self.plan.get_z2_bounds(MAX_HR, rhr_for_zones)
-        z2_pct_text = "N/A"
+        zone_dist_text = "N/A"
         if z2_bounds:
-            z2_pct = compute_z2_pct(
+            dist = compute_zone_distribution(
                 activity.get("hr_zones_json"),
                 activity.get("splits_json", ""),
                 z2_bounds[0],
                 z2_bounds[1],
             )
-            if z2_pct is not None:
-                z2_pct_text = f"{z2_pct}% (target ≥80% on easy runs; Z2 = {z2_bounds[0]}-{z2_bounds[1]} bpm via %HRR)"
+            if dist is not None:
+                zone_dist_text = (
+                    f"Easy (Z1+Z2) {dist['easy_pct']}% (target ≥80% on easy runs) — "
+                    f"breakdown: Z1 {dist['z1_pct']}% | Z2 {dist['z2_pct']}% | "
+                    f"Z3+ {dist['z3plus_pct']}% "
+                    f"[Z2 band = {z2_bounds[0]}-{z2_bounds[1]} bpm via %HRR]"
+                )
 
         # Load context
         acr = compute_acr(self.db, run_date)
@@ -557,6 +717,22 @@ COACHING STYLE:
         else:
             trend_text = "Not enough easy-run history yet for a trend (need 2+)"
 
+        # Conditions + subjective effort (from the watch's post-run prompt)
+        weather_text = format_weather(activity)
+        heat_cue = heat_note(activity)
+        rpe = activity.get("rpe")
+        feel = activity.get("feel")
+        feel_label = format_feel(feel)
+        if rpe is None and feel_label is None:
+            subjective_text = "Not logged (no watch prompt response)"
+        else:
+            bits = []
+            if rpe is not None:
+                bits.append(f"RPE {rpe}/10")
+            if feel_label is not None:
+                bits.append(f"Feel: {feel_label}")
+            subjective_text = " | ".join(bits)
+
         user_prompt = f"""Analyze this run and provide coaching feedback.
 
 TODAY'S RUN ({weekday_name}):
@@ -572,9 +748,15 @@ TODAY'S RUN ({weekday_name}):
 - Training Load: {activity.get('training_load', 'N/A')}
 - Garmin Assessment: {activity.get('training_effect_label', 'N/A')}
 
+CONDITIONS:
+- Weather: {weather_text}{heat_cue}
+
+SUBJECTIVE EFFORT (from watch post-run prompt):
+- {subjective_text}
+
 RUN QUALITY:
 - HR Drift: {drift_text}
-- Z2 Time-in-Zone: {z2_pct_text}
+- Zone Distribution: {zone_dist_text}
 
 LOAD CONTEXT:
 - {acr_text}
@@ -603,14 +785,15 @@ RECENT TRAINING:
 Provide:
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
-3. HR/effort analysis — explicitly use HR drift % and Z2 time-in-zone (call out if easy ran too hard)
-4. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
-5. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
-6. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
-7. Cadence & elevation note (if relevant)
-8. One thing done well
-9. One thing to watch or improve
-10. Brief look-ahead to next scheduled run"""
+3. HR/effort analysis — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
+4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
+5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
+6. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
+7. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
+8. Cadence & elevation note (if relevant)
+9. One thing done well
+10. One thing to watch or improve
+11. Brief look-ahead to next scheduled run"""
 
         response = self.client.messages.create(
             model=MODEL,
@@ -629,7 +812,7 @@ Provide:
         return _extract_text(response)
 
     def _race_countdown(self) -> dict:
-        today = date.today()
+        today, _ = resolve_runner_today(self.db)
         days_remaining = (RACE_DATE - today).days
         total_weeks = 32
         elapsed_weeks = (today - PLAN_START_DATE).days / 7
@@ -765,11 +948,92 @@ Keep it Telegram-friendly (under 3000 chars)."""
         )
         return _extract_text(response)
 
+    def morning_brief(self, today: date) -> str:
+        """Generate a short pre-run advisory: stick with the plan, modify, or postpone.
+
+        Pulls the same context analyze_run uses — wellness (with staleness flag),
+        ACR, weekly progress, prescribed workout, upcoming runs — and asks the
+        model for a one-line verdict + specific modification if warranted.
+        Designed to fire at 06:00 runner-local, hours before the prescribed run.
+        """
+        prescribed = self.plan.get_prescribed_run(today)
+        if not prescribed or prescribed.workout_type == "rest":
+            # The caller (prerun.py) gates on this too, but defend in depth.
+            return ""
+
+        weekday_name = today.strftime("%A, %B %d")
+        wellness = self.db.get_latest_wellness()
+        recovery_text = format_recovery(wellness, today)
+        acr = compute_acr(self.db, today)
+        acr_text = (
+            f"ACR {acr['ratio']} (acute 7d={acr['acute_7d']}, chronic 28d={acr['chronic_28d']}; "
+            f"sweet spot 0.8–1.3, danger >1.5)"
+            if acr else "ACR: insufficient training-load history"
+        )
+        target = compute_weekly_target(self.plan, self.db, today)
+        weekly_target_text = (
+            f"Wk {target['week_number']} ({target['phase']}): "
+            f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%) "
+            f"with {target['days_remaining']} days remaining in week"
+            if target else "Outside training plan window"
+        )
+        upcoming = format_upcoming_runs(self.plan, today, days=3)
+        ts = self.db.get_latest_training_status()
+        ts_text = "Not available"
+        if ts:
+            ts_text = (
+                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
+                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
+                f"Status: {ts.get('training_status_label', 'N/A')}"
+            )
+
+        prescribed_text = prescribed.description.replace("\n", " ")
+
+        user_prompt = f"""It's early morning — runner hasn't trained yet today. Give a pre-run brief that helps them decide what to do this morning.
+
+TODAY ({weekday_name}):
+- Prescribed: {prescribed_text}
+
+RECOVERY & READINESS (last available night):
+{recovery_text}
+
+LOAD CONTEXT:
+- {acr_text}
+- Weekly target: {weekly_target_text}
+
+TRAINING STATUS:
+{ts_text}
+
+NEXT FEW DAYS:
+{upcoming}
+
+Provide:
+1. **Verdict** in one short line — one of: stick with plan / modify / postpone / skip.
+2. **Recommendation** if modifying — specific (e.g. "drop pace to easy 6:30/km", "swap with Saturday's easy run", "cut to 4km"). One sentence.
+3. **Why** — one short sentence citing the specific data point that drove the call (e.g. "HRV down 18% from baseline").
+
+If stale-wellness flag is present, lean toward "trust your legs this morning — recent data missing."
+Keep the whole thing under 500 chars — runner is reading on phone half-awake. No greetings, no sign-off."""
+
+        response = self.client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            system=[
+                {
+                    "type": "text",
+                    "text": self._build_system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return _extract_text(response)
+
     def chat(self, user_message: str) -> str:
         """Handle interactive conversation via Telegram."""
         history = self.db.get_recent_conversations(limit=10)
         recent_runs = self.db.get_recent_activities(limit=5)
-        today = date.today()
+        today, _ = resolve_runner_today(self.db)
 
         messages = [{"role": h["role"], "content": h["content"]} for h in history]
 
@@ -810,7 +1074,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
             )
 
         wellness = self.db.get_latest_wellness()
-        recovery = format_recovery(wellness)
+        recovery = format_recovery(wellness, today)
         if recovery and recovery != "No recent wellness data":
             context_lines.append(f"Latest wellness: {recovery}")
 

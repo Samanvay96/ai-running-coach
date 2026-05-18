@@ -17,6 +17,8 @@ import pytest
 from src.coach import (
     Coach,
     _extract_text,
+    _format_weekly_target,
+    compute_weekly_target,
     compute_zone_distribution,
     format_feel,
     format_recovery,
@@ -397,3 +399,65 @@ def test_chat_returns_text_with_rich_context(coach):
     last_user_msg = call_kwargs["messages"][-1]["content"]
     # Rich context prefix is bracketed; if it's missing, chat() lost its data.
     assert "[Context for this conversation" in last_user_msg or "Recent runs" in last_user_msg
+
+
+# ---------------- weekly target framing ----------------
+#
+# Regression: on May 18 2026 the run-review said "16km remaining across 6 days
+# (avg ~2.7km/day)". The runner doesn't run every day — the plan has rest days
+# — so per-day averaging across the whole week is misleading. compute_weekly_target
+# now exposes remaining *prescribed runs* and _format_weekly_target frames the
+# string around that, so the model has no reason to divide by calendar days.
+
+
+def test_compute_weekly_target_excludes_rest_days_from_remaining_runs():
+    plan = TrainingPlan(str(TRAINING_PLAN_PATH))
+    db = Database(DB_PATH)
+    # 2026-05-18 is a Monday; the v5 plan schedules runs on Mon/Wed/Fri for
+    # this base-bridge week, so after Monday only Wed + Fri should remain.
+    t = compute_weekly_target(plan, db, date(2026, 5, 18))
+    assert t is not None
+    assert t["remaining_runs_count"] == 2
+    weekdays = [r["weekday"] for r in t["remaining_runs"]]
+    assert weekdays == ["Wed", "Fri"]
+    assert t["remaining_runs_km"] == sum(r["km"] for r in t["remaining_runs"])
+
+
+def test_format_weekly_target_uses_runs_not_days():
+    target = {
+        "week_number": 9,
+        "phase": "Base (Bridge)",
+        "actual_km": 6.0,
+        "target_km": 22.0,
+        "pct": 27.3,
+        "days_remaining": 6,
+        "remaining_runs_count": 2,
+        "remaining_runs_km": 16.0,
+        "remaining_runs": [
+            {"weekday": "Wed", "type": "easy", "km": 5.0},
+            {"weekday": "Fri", "type": "easy", "km": 11.0},
+        ],
+    }
+    out = _format_weekly_target(target)
+    assert "2 prescribed run(s) left" in out
+    assert "16.0km total" in out
+    assert "Wed easy 5.0km" in out and "Fri easy 11.0km" in out
+    # The misleading framings must not appear.
+    assert "days remaining" not in out
+    assert "days left" not in out
+    assert "/day" not in out
+
+
+def test_format_weekly_target_handles_no_runs_left():
+    target = {
+        "week_number": 9, "phase": "Base", "actual_km": 22.0, "target_km": 22.0,
+        "pct": 100.0, "days_remaining": 1, "remaining_runs_count": 0,
+        "remaining_runs_km": 0.0, "remaining_runs": [],
+    }
+    out = _format_weekly_target(target)
+    assert "No more runs scheduled" in out
+    assert "days" not in out
+
+
+def test_format_weekly_target_handles_outside_plan_window():
+    assert _format_weekly_target(None) == "Outside training plan window"

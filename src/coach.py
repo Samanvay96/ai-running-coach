@@ -372,8 +372,11 @@ def compute_easy_run_trend(plan: TrainingPlan, recent_runs: list[dict], n: int =
 def compute_weekly_target(plan: TrainingPlan, db: Database, today: date) -> dict | None:
     """Where the runner stands against this week's prescribed mileage target.
 
-    Returns actual km so far this week, target km, % progress, and days remaining
-    in the week. Returns None if today is outside the plan window.
+    Includes the planned runs still remaining this week (count + km), so callers
+    can report "2 runs left totaling 16km" instead of "6 calendar days left",
+    which would invite a misleading per-day average across rest days.
+
+    Returns None if today is outside the plan window.
     """
     week = plan.get_week_for_date(today)
     if not week or not week.weekly_km_target:
@@ -383,14 +386,54 @@ def compute_weekly_target(plan: TrainingPlan, db: Database, today: date) -> dict
     actual = db.get_distance_sum(week_start, today_end)
     pct = round(actual / week.weekly_km_target * 100, 1) if week.weekly_km_target > 0 else 0
     days_remaining = 6 - today.weekday()
+
+    remaining_runs: list[dict] = []
+    for offset in range(1, days_remaining + 1):
+        d = today + timedelta(days=offset)
+        prescribed = plan.get_prescribed_run(d)
+        if prescribed and prescribed.distance_km > 0:
+            remaining_runs.append({
+                "weekday": d.strftime("%a"),
+                "type": prescribed.workout_type,
+                "km": round(prescribed.distance_km, 1),
+            })
+    remaining_km = round(sum(r["km"] for r in remaining_runs), 1)
+
     return {
         "actual_km": round(actual, 1),
         "target_km": round(week.weekly_km_target, 1),
         "pct": pct,
         "days_remaining": days_remaining,
+        "remaining_runs_count": len(remaining_runs),
+        "remaining_runs_km": remaining_km,
+        "remaining_runs": remaining_runs,
         "week_number": week.week_number,
         "phase": week.phase,
     }
+
+
+def _format_weekly_target(target: dict | None) -> str:
+    """One-line weekly-target summary for LLM prompts.
+
+    Frames "what's left" in terms of *prescribed runs*, not calendar days, so
+    the model doesn't divide remaining km by 6 and suggest a daily average —
+    the plan has rest days and the runner doesn't run every day.
+    """
+    if not target:
+        return "Outside training plan window"
+    base = (
+        f"Wk {target['week_number']} ({target['phase']}): "
+        f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%)"
+    )
+    runs = target.get("remaining_runs") or []
+    if not runs:
+        return base + ". No more runs scheduled this week."
+    breakdown = ", ".join(f"{r['weekday']} {r['type']} {r['km']}km" for r in runs)
+    return (
+        base
+        + f". {target['remaining_runs_count']} prescribed run(s) left "
+        f"({target['remaining_runs_km']}km total): {breakdown}."
+    )
 
 
 def format_upcoming_runs(plan: TrainingPlan, today: date, days: int = 3) -> str:
@@ -691,12 +734,7 @@ COACHING STYLE:
             adherence_text = "No prescribed runs in lookback window"
 
         target = compute_weekly_target(self.plan, self.db, run_date)
-        weekly_target_text = (
-            f"Wk {target['week_number']} ({target['phase']}): "
-            f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%) "
-            f"with {target['days_remaining']} days remaining in week"
-            if target else "Outside training plan window"
-        )
+        weekly_target_text = _format_weekly_target(target)
 
         # Cross-run trend on prescribed easy runs (last 4 like-for-like)
         trend = compute_easy_run_trend(self.plan, recent, n=4)
@@ -788,7 +826,7 @@ Provide:
 4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
 5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
 6. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
-7. Weekly target check — current km vs target with days remaining (caution if pace requires >40% of weekly km in remaining days)
+7. Weekly target check — current km vs target with the *prescribed runs* still left this week (do not divide remaining km by calendar days or suggest a per-day average; rest days exist and the runner doesn't run every day). Flag only if the remaining scheduled runs can't realistically close the gap.
 8. Cadence & elevation note (if relevant)
 9. One thing done well
 10. One thing to watch or improve
@@ -977,12 +1015,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
             if acr else "ACR: insufficient training-load history"
         )
         target = compute_weekly_target(self.plan, self.db, today)
-        weekly_target_text = (
-            f"Wk {target['week_number']} ({target['phase']}): "
-            f"{target['actual_km']}km of {target['target_km']}km target ({target['pct']}%) "
-            f"with {target['days_remaining']} days remaining in week"
-            if target else "Outside training plan window"
-        )
+        weekly_target_text = _format_weekly_target(target)
         upcoming = format_upcoming_runs(self.plan, today, days=3)
         ts = self.db.get_latest_training_status()
         ts_text = "Not available"
@@ -1067,9 +1100,15 @@ Keep the whole thing under 500 chars — runner is reading on phone half-awake. 
 
         target = compute_weekly_target(self.plan, self.db, today)
         if target:
+            tail = (
+                f"{target['remaining_runs_count']} runs left "
+                f"({target['remaining_runs_km']}km)"
+                if target.get("remaining_runs_count")
+                else "no more runs scheduled"
+            )
             context_lines.append(
                 f"This week: {target['actual_km']}/{target['target_km']} km "
-                f"({target['pct']}%, {target['days_remaining']} days left)"
+                f"({target['pct']}%, {tail})"
             )
 
         adherence = compute_adherence(self.plan, self.db, today)

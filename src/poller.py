@@ -24,12 +24,28 @@ from src.backup import run_backup
 from src.time_utils import compute_tz_offset_minutes
 
 
+def _f_to_c(f: float | int | None) -> float | None:
+    if f is None:
+        return None
+    return round((float(f) - 32) * 5 / 9, 1)
+
+
+def _mph_to_kph(mph: float | int | None) -> float | None:
+    if mph is None:
+        return None
+    return round(float(mph) * 1.609344, 1)
+
+
 def extract_weather_fields(weather: dict | None) -> dict:
     """Pull the fields we surface to the coach out of Garmin's weather payload.
 
     Returns a dict with temp_c / apparent_temp_c / humidity_pct / wind_kph / label,
-    each None when the field isn't present. Garmin's keys vary slightly across
-    firmwares, so we try the common ones.
+    each None when the field isn't present.
+
+    Garmin's /activity/{id}/weather endpoint returns temperatures in Fahrenheit and
+    wind in mph regardless of the account's measurementSystem preference, and the
+    payload carries no unit field. We always convert F→C and mph→kph here; humidity
+    is unit-agnostic.
     """
     if not weather or not isinstance(weather, dict):
         return {"temp_c": None, "apparent_temp_c": None, "humidity_pct": None,
@@ -40,10 +56,10 @@ def extract_weather_fields(weather: dict | None) -> dict:
         label = wt.get("desc") or wt.get("weatherTypeDesc")
     label = label or weather.get("weatherTypeDesc")
     return {
-        "temp_c": weather.get("temp"),
-        "apparent_temp_c": weather.get("apparentTemp"),
+        "temp_c": _f_to_c(weather.get("temp")),
+        "apparent_temp_c": _f_to_c(weather.get("apparentTemp")),
         "humidity_pct": weather.get("relativeHumidity"),
-        "wind_kph": weather.get("windSpeed"),
+        "wind_kph": _mph_to_kph(weather.get("windSpeed")),
         "label": label,
     }
 

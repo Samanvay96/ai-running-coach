@@ -899,35 +899,41 @@ RECENT TRAINING:
 {format_recent_activities(recent)}
 
 Write the review using EXACTLY these sections, in this order, each under the bold
-header shown — don't rename, reorder, merge, or add sections. The ALWAYS sections
-appear every time. The [only if] sections are report-by-exception: include them
-only when their trigger is met and OMIT them entirely otherwise (don't echo data
-the runner already logged or restate a tally that isn't actionable).
+header shown (with its leading emoji) — don't rename, reorder, merge, or add
+sections, and don't change a section's emoji. The ALWAYS sections appear every
+time. The [only if] sections are report-by-exception: include them only when
+their trigger is met and OMIT them entirely otherwise (don't echo data the runner
+already logged or restate a tally that isn't actionable).
 
-**Verdict** [always] — one line (e.g. "Solid easy run, right on target").
+🎯 **Verdict** [always] — one line (e.g. "Solid easy run, right on target").
 
-**Prescribed vs Actual** [always] — compare distance and pace to what was prescribed.
+📋 **Prescribed vs Actual** [always] — compare distance and pace to what was prescribed.
 
-**HR & Effort** [always] — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
+❤️ **HR & Effort** [always] — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
 
-**Subjective** [only if RPE/Feel diverges] — high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run, OMIT — don't read the logged number back.
+💬 **Subjective** [only if RPE/Feel diverges] — high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run, OMIT — don't read the logged number back.
 
-**Trend** [always] — if the easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it. If there isn't enough history yet, say so in one line.
+📈 **Trend** [always] — if the easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it. If there isn't enough history yet, say so in one line.
 
-**Recovery & Load** [always] — first ALWAYS state the latest night's sleep score, HRV (with its 7-day avg), and RHR, even when nominal; if the wellness data is flagged stale, say so and discount it. Then the load read: ACR and the trailing-7d volume delta share the same rolling window, so read them as ONE signal — never present them as a contradiction. Weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), the real injury risk during a rebuild. Flag concerns: ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or poor HRV/sleep.
+🔋 **Recovery & Load** [always] — first ALWAYS state the latest night's sleep score, HRV (with its 7-day avg), and RHR, even when nominal; if the wellness data is flagged stale, say so and discount it. Then the load read: ACR and the trailing-7d volume delta share the same rolling window, so read them as ONE signal — never present them as a contradiction. Weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), the real injury risk during a rebuild. Flag concerns: ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or poor HRV/sleep.
 
-**Weekly Target** [only if off track] — prescribed runs missed, or the runs still scheduled this week can't realistically close the gap. If on track, OMIT. Frame what's left as *prescribed runs remaining*, never a per-day average across calendar days (rest days exist; the runner doesn't run every day).
+📅 **Weekly Target** [only if off track] — prescribed runs missed, or the runs still scheduled this week can't realistically close the gap. If on track, OMIT. Frame what's left as *prescribed runs remaining*, never a per-day average across calendar days (rest days exist; the runner doesn't run every day).
 
-**Form** [only if it deviates] — cadence moved ≥3 spm from the runner's OWN recent baseline (in RUNNING FORM), framed as "down/up from your usual N" (never a generic target), OR ground contact / vertical oscillation sits notably outside the typical band shown, OR elevation shaped the run. Otherwise OMIT.
+🏃 **Form** [only if it deviates] — cadence moved ≥3 spm from the runner's OWN recent baseline (in RUNNING FORM), framed as "down/up from your usual N" (never a generic target), OR ground contact / vertical oscillation sits notably outside the typical band shown, OR elevation shaped the run. Otherwise OMIT.
 
-**Best** [always] — one thing done well.
+💪 **Best** [always] — one thing done well.
 
-**Watch** [always] — one thing to watch or improve.
+👀 **Watch** [always] — one thing to watch or improve.
 
-**Next Up** [always] — brief look-ahead to the next scheduled run.
+⏭️ **Next Up** [always] — brief look-ahead to the next scheduled run.
 
-FORMATTING: put each bold header on its OWN line, content on the next line(s),
-with a blank line between sections — never "**Header:** text…" inline."""
+EMOJIS — keep them deterministic and accessible, not decorative:
+- Each section header carries its fixed leading emoji above; never swap or add others to a header.
+- Inside the text, use ONLY this status set, and only to mark a genuine judgement: ✅ on target / good, ⚠️ worth watching, 🔴 a flag that needs action. Use them sparingly — at most one or two per section, never stacked.
+- Emojis must never replace words: every line has to read correctly with all emojis removed (they're scanning aids, not content).
+
+FORMATTING: put each bold header (with its emoji) on its OWN line, content on the
+next line(s), with a blank line between sections — never "**Header:** text…" inline."""
 
         response = self.client.messages.create(
             model=MODEL,

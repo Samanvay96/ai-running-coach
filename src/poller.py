@@ -300,11 +300,19 @@ def poll():
     except Exception as e:
         log.warning("Failed to save training status: %s", e)
 
-    # Fetch and store daily wellness (sleep, HRV, RHR) for yesterday.
-    # Sleep is recorded after waking, so "yesterday" gives the most recent complete night.
+    # Fetch and store the most recent complete night's wellness (sleep, HRV, RHR).
+    # Garmin dates a sleep record by the wake-up (calendar) date, so TODAY's record
+    # is the night just completed — that's the freshest data. Only if today hasn't
+    # synced yet (e.g. an overnight poll before the watch uploads) do we fall back to
+    # yesterday. Fetching today-1 unconditionally (the old behaviour) always lagged a
+    # night behind and the staleness check then masked it as "fresh".
     try:
-        wellness_date = date.today() - timedelta(days=1)
+        wellness_date = date.today()
         sleep_data = garmin.get_sleep(wellness_date)
+        synced = bool(((sleep_data or {}).get("dailySleepDTO") or {}).get("sleepTimeSeconds"))
+        if not synced:
+            wellness_date = date.today() - timedelta(days=1)
+            sleep_data = garmin.get_sleep(wellness_date)
         hrv_data = garmin.get_hrv(wellness_date)
         rhr_data = garmin.get_rhr(wellness_date)
 

@@ -898,18 +898,27 @@ PRESCRIBED FOR TODAY ({week_info}):
 RECENT TRAINING:
 {format_recent_activities(recent)}
 
-Provide:
+Provide the sections below. Items marked [only if] are report-by-exception:
+include them ONLY when they carry an actionable signal, and omit the section
+entirely otherwise — a shorter review where every line earns its place beats a
+complete-looking one. Never echo back data the runner already logged, or restate
+a tally that isn't actionable.
+
 1. One-line verdict (e.g. "Solid easy run, right on target")
 2. Prescribed vs actual comparison
 3. HR/effort analysis — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
-4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
+4. Subjective-vs-objective check [only if] — surface this ONLY when RPE/Feel diverges from the objective read: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run (e.g. low RPE on an easy run), OMIT this entirely — don't read the logged number back.
 5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
 6. Recovery & load read — flag if ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or HRV/sleep poor. ACR and the trailing-7d volume delta use the same rolling window, so read them together as ONE load signal — never present them as a contradiction ("ACR high even though volume down"). If they disagree, you've misread one. Also weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), which is the real injury risk during a rebuild.
-7. Weekly target check — current km vs target with the *prescribed runs* still left this week (do not divide remaining km by calendar days or suggest a per-day average; rest days exist and the runner doesn't run every day). Flag only if the remaining scheduled runs can't realistically close the gap.
+7. Weekly target check [only if] — surface this ONLY when you're off track: prescribed runs have been missed, or the runs still scheduled this week can't realistically close the gap. If on track, OMIT it — don't restate the running km tally on a normal run. When you do mention what's left, frame it as *prescribed runs remaining*, never a per-day average across calendar days (rest days exist; the runner doesn't run every day).
 8. Form & elevation note — compare cadence to the runner's OWN recent baseline (in RUNNING FORM); comment only on a meaningful move from it (≥3 spm) and frame it as "down/up from your usual N", never a generic target cadence. Mention ground contact or vertical oscillation only if it sits notably outside the typical band shown; otherwise stay quiet on form. Note elevation only if it shaped the run.
 9. One thing done well
 10. One thing to watch or improve
-11. Brief look-ahead to next scheduled run"""
+11. Brief look-ahead to next scheduled run
+
+FORMATTING: put each section's bold header on its OWN line, with the content
+starting on the next line — never "**Header:** text…" on one line. Leave a blank
+line between sections."""
 
         response = self.client.messages.create(
             model=MODEL,

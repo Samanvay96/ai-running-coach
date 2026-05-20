@@ -898,27 +898,36 @@ PRESCRIBED FOR TODAY ({week_info}):
 RECENT TRAINING:
 {format_recent_activities(recent)}
 
-Provide the sections below. Items marked [only if] are report-by-exception:
-include them ONLY when they carry an actionable signal, and omit the section
-entirely otherwise — a shorter review where every line earns its place beats a
-complete-looking one. Never echo back data the runner already logged, or restate
-a tally that isn't actionable.
+Write the review using EXACTLY these sections, in this order, each under the bold
+header shown — don't rename, reorder, merge, or add sections. The ALWAYS sections
+appear every time. The [only if] sections are report-by-exception: include them
+only when their trigger is met and OMIT them entirely otherwise (don't echo data
+the runner already logged or restate a tally that isn't actionable).
 
-1. One-line verdict (e.g. "Solid easy run, right on target")
-2. Prescribed vs actual comparison
-3. HR/effort analysis — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
-4. Subjective-vs-objective check [only if] — surface this ONLY when RPE/Feel diverges from the objective read: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run (e.g. low RPE on an easy run), OMIT this entirely — don't read the logged number back.
-5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
-6. Recovery & load read — flag if ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or HRV/sleep poor. ACR and the trailing-7d volume delta use the same rolling window, so read them together as ONE load signal — never present them as a contradiction ("ACR high even though volume down"). If they disagree, you've misread one. Also weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), which is the real injury risk during a rebuild.
-7. Weekly target check [only if] — surface this ONLY when you're off track: prescribed runs have been missed, or the runs still scheduled this week can't realistically close the gap. If on track, OMIT it — don't restate the running km tally on a normal run. When you do mention what's left, frame it as *prescribed runs remaining*, never a per-day average across calendar days (rest days exist; the runner doesn't run every day).
-8. Form & elevation note — compare cadence to the runner's OWN recent baseline (in RUNNING FORM); comment only on a meaningful move from it (≥3 spm) and frame it as "down/up from your usual N", never a generic target cadence. Mention ground contact or vertical oscillation only if it sits notably outside the typical band shown; otherwise stay quiet on form. Note elevation only if it shaped the run.
-9. One thing done well
-10. One thing to watch or improve
-11. Brief look-ahead to next scheduled run
+**Verdict** [always] — one line (e.g. "Solid easy run, right on target").
 
-FORMATTING: put each section's bold header on its OWN line, with the content
-starting on the next line — never "**Header:** text…" on one line. Leave a blank
-line between sections."""
+**Prescribed vs Actual** [always] — compare distance and pace to what was prescribed.
+
+**HR & Effort** [always] — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
+
+**Subjective** [only if RPE/Feel diverges] — high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run, OMIT — don't read the logged number back.
+
+**Trend** [always] — if the easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it. If there isn't enough history yet, say so in one line.
+
+**Recovery & Load** [always] — first ALWAYS state the latest night's sleep score, HRV (with its 7-day avg), and RHR, even when nominal; if the wellness data is flagged stale, say so and discount it. Then the load read: ACR and the trailing-7d volume delta share the same rolling window, so read them as ONE signal — never present them as a contradiction. Weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), the real injury risk during a rebuild. Flag concerns: ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or poor HRV/sleep.
+
+**Weekly Target** [only if off track] — prescribed runs missed, or the runs still scheduled this week can't realistically close the gap. If on track, OMIT. Frame what's left as *prescribed runs remaining*, never a per-day average across calendar days (rest days exist; the runner doesn't run every day).
+
+**Form** [only if it deviates] — cadence moved ≥3 spm from the runner's OWN recent baseline (in RUNNING FORM), framed as "down/up from your usual N" (never a generic target), OR ground contact / vertical oscillation sits notably outside the typical band shown, OR elevation shaped the run. Otherwise OMIT.
+
+**Best** [always] — one thing done well.
+
+**Watch** [always] — one thing to watch or improve.
+
+**Next Up** [always] — brief look-ahead to the next scheduled run.
+
+FORMATTING: put each bold header on its OWN line, content on the next line(s),
+with a blank line between sections — never "**Header:** text…" inline."""
 
         response = self.client.messages.create(
             model=MODEL,

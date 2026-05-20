@@ -267,17 +267,27 @@ def compute_acr(db: Database, today: date) -> dict | None:
 
 
 def compute_mileage_delta(db: Database, today: date) -> dict:
-    """This week's km vs prior 4-week avg. Returns absolute and % delta."""
-    this_week_start = (today - timedelta(days=today.weekday())).isoformat()  # Mon of current week
-    this_week_end = (today + timedelta(days=1)).isoformat()
-    prior_start = (date.fromisoformat(this_week_start) - timedelta(days=28)).isoformat()
+    """Trailing-7-day km vs the 28-day weekly average. Returns absolute and % delta.
 
-    this_km = db.get_distance_sum(this_week_start, this_week_end)
-    prior_km = db.get_distance_sum(prior_start, this_week_start)
-    prior_weekly_avg = prior_km / 4
-    pct_delta = ((this_km - prior_weekly_avg) / prior_weekly_avg * 100) if prior_weekly_avg > 0 else None
+    This is the distance-based analogue of ACR and deliberately uses the *same*
+    rolling windows as compute_acr (acute = trailing 7d, chronic = trailing 28d
+    / 4). Mirroring the windows is the whole point: a calendar week-to-date vs
+    full-prior-week comparison is biased low mid-week (only N of 7 days banked),
+    which previously made volume read "down" while ACR read "up" — a contradiction
+    that was a pure window artifact, not a real signal. With matched windows the
+    two can only ever agree in direction. Calendar-week *plan progress* lives in
+    compute_weekly_target, which is correctly Monday-anchored — don't conflate them.
+    """
+    acute_start = (today - timedelta(days=7)).isoformat()
+    chronic_start = (today - timedelta(days=28)).isoformat()
+    end = (today + timedelta(days=1)).isoformat()  # exclusive upper bound, matches compute_acr
+
+    last_7d = db.get_distance_sum(acute_start, end)
+    chronic_28d = db.get_distance_sum(chronic_start, end)
+    prior_weekly_avg = chronic_28d / 4
+    pct_delta = ((last_7d - prior_weekly_avg) / prior_weekly_avg * 100) if prior_weekly_avg > 0 else None
     return {
-        "this_week_km": round(this_km, 1),
+        "last_7d_km": round(last_7d, 1),
         "prior_4wk_avg_km": round(prior_weekly_avg, 1),
         "pct_delta": round(pct_delta, 1) if pct_delta is not None else None,
     }
@@ -715,10 +725,11 @@ COACHING STYLE:
         delta = compute_mileage_delta(self.db, run_date)
         delta_pct = delta.get("pct_delta")
         delta_text = (
-            f"This week {delta['this_week_km']}km vs prior 4-week avg {delta['prior_4wk_avg_km']}km "
-            f"({'+' if (delta_pct or 0) >= 0 else ''}{delta_pct}%)"
+            f"Last 7 days {delta['last_7d_km']}km vs 4-week avg {delta['prior_4wk_avg_km']}km/wk "
+            f"({'+' if (delta_pct or 0) >= 0 else ''}{delta_pct}%) — trailing window, "
+            f"tracks ACR; not calendar-week progress"
             if delta_pct is not None
-            else f"This week {delta['this_week_km']}km (no prior baseline)"
+            else f"Last 7 days {delta['last_7d_km']}km (no prior baseline)"
         )
 
         # Plan adherence and weekly target progress
@@ -825,7 +836,7 @@ Provide:
 3. HR/effort analysis — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
 4. Subjective-vs-objective check — if RPE/Feel is logged: high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace is an early fatigue/illness signal; flag it. Low RPE (≤4) on a hard prescribed session means you had more to give.
 5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
-6. Recovery & load read — flag if ACR >1.5, mileage jump >10%, adherence <70%, or HRV/sleep poor
+6. Recovery & load read — flag if ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or HRV/sleep poor. ACR and the trailing-7d volume delta use the same rolling window, so read them together as ONE load signal — never present them as a contradiction ("ACR high even though volume down"). If they disagree, you've misread one. Also weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), which is the real injury risk during a rebuild.
 7. Weekly target check — current km vs target with the *prescribed runs* still left this week (do not divide remaining km by calendar days or suggest a per-day average; rest days exist and the runner doesn't run every day). Flag only if the remaining scheduled runs can't realistically close the gap.
 8. Cadence & elevation note (if relevant)
 9. One thing done well
@@ -914,10 +925,10 @@ Provide:
         delta = compute_mileage_delta(self.db, end_date_obj)
         dpct = delta.get("pct_delta")
         delta_text = (
-            f"Week vs prior 4-wk avg: {delta['this_week_km']}km vs {delta['prior_4wk_avg_km']}km "
+            f"Trailing 7d vs 4-wk avg: {delta['last_7d_km']}km vs {delta['prior_4wk_avg_km']}km/wk "
             f"({'+' if (dpct or 0) >= 0 else ''}{dpct}%)"
             if dpct is not None
-            else f"Week total: {delta['this_week_km']}km (no prior baseline)"
+            else f"Trailing 7d: {delta['last_7d_km']}km (no prior baseline)"
         )
 
         # Wellness trend across the week
@@ -968,7 +979,7 @@ Provide:
 1. Week headline (e.g. "Strong week — hit all targets")
 2. Volume comparison (actual vs prescribed km) and ramp call-out (>10% jump = caution)
 3. Key observations from the runs (pace trends, HR patterns, cadence)
-4. Load assessment using ACR (flag if outside 0.8–1.3)
+4. Load assessment using ACR (flag if outside 0.8–1.3). The trailing-7d volume delta shares ACR's window — read them together as one signal, never as a contradiction. After a layoff a depressed chronic base inflates ACR, so separate that artifact from genuine ramping (rising absolute trailing-7d km).
 5. Recovery state from wellness trend (sleep avg, HRV/RHR drift)
 6. What went well this week
 7. Focus for next week

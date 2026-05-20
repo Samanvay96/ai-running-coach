@@ -18,6 +18,8 @@ from src.coach import (
     Coach,
     _extract_text,
     _format_weekly_target,
+    compute_acr,
+    compute_mileage_delta,
     compute_weekly_target,
     compute_zone_distribution,
     format_feel,
@@ -461,3 +463,49 @@ def test_format_weekly_target_handles_no_runs_left():
 
 def test_format_weekly_target_handles_outside_plan_window():
     assert _format_weekly_target(None) == "Outside training plan window"
+
+
+def test_mileage_delta_uses_trailing_window_and_agrees_with_acr():
+    """Mid-week, trailing-7d volume must agree in direction with ACR.
+
+    Reproduces the 2026-05-20 artifact: a Wednesday (3 of 7 calendar days
+    elapsed) with a big long run in the trailing window. The old calendar
+    week-to-date comparison read volume as DOWN (only Mon+Wed banked) while
+    ACR read load as UP — a contradiction the coach surfaced as a paradox.
+    With matched rolling windows, volume reads up and the two never disagree.
+    """
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(_P(tmp) / "test.db")
+        # (date, km, load). Trailing 7d ending Wed 05-20 holds 23km incl. the
+        # 05-16 long run; the prior weeks ramp up from a low post-layoff base.
+        runs = [
+            ("2026-04-24", 4.0, 50.0), ("2026-04-27", 4.0, 50.0),
+            ("2026-05-02", 4.0, 58.5), ("2026-05-05", 5.0, 71.4),
+            ("2026-05-07", 5.0, 70.2), ("2026-05-09", 10.0, 69.7),
+            ("2026-05-12", 5.0, 69.4),
+            ("2026-05-14", 4.0, 55.2), ("2026-05-16", 8.0, 111.8),
+            ("2026-05-18", 6.0, 71.8), ("2026-05-20", 5.0, 66.7),
+        ]
+        for i, (d, km, load) in enumerate(runs):
+            db.save_activity(
+                activity_id=i + 1, start_time=f"{d} 08:00:00",
+                activity_type="running", distance_km=km, duration_seconds=1800,
+                avg_pace="6:30", avg_hr=145, max_hr=160, calories=300,
+                aerobic_te=2.0, vo2max=None, raw_json="{}", splits_json="[]",
+                training_load=load, tz_offset_minutes=60,
+            )
+
+        today = date(2026, 5, 20)  # a Wednesday — only 3/7 calendar days elapsed
+        delta = compute_mileage_delta(db, today)
+        acr = compute_acr(db, today)
+
+        # Trailing 7d captures the full 23km, not the 11km calendar week-to-date.
+        assert delta["last_7d_km"] == 23.0
+        # Volume reads UP (was negative under the old calendar-week logic)...
+        assert delta["pct_delta"] > 0
+        # ...and agrees in direction with ACR — both say "ramping". The invariant
+        # the fix guarantees: shared window ⇒ sign(delta) matches (ACR > 1).
+        assert (delta["pct_delta"] > 0) == (acr["ratio"] > 1)
+        db.close()

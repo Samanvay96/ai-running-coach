@@ -47,6 +47,18 @@ class GarminClient:
             if a.get("activityType", {}).get("typeKey") in RUNNING_TYPES
         ]
 
+    def get_activity_detail(self, activity_id: int) -> dict | None:
+        """Full activity detail (the /activity/{id} endpoint).
+
+        Carries fields absent from the activity-list summary — notably
+        summaryDTO.directWorkoutRpe / directWorkoutFeel from the watch's
+        post-run "How did that feel?" prompt.
+        """
+        return _with_retry(
+            self.api.get_activity, activity_id,
+            _label=f"detail for activity {activity_id}",
+        )
+
     def get_activity_splits(self, activity_id: int) -> list[dict]:
         return _with_retry(
             self.api.get_activity_splits, activity_id,

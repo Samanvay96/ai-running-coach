@@ -64,6 +64,22 @@ def extract_weather_fields(weather: dict | None) -> dict:
     }
 
 
+def extract_subjective_fields(detail: dict | None) -> dict:
+    """Pull post-run RPE + Feel out of the activity-detail payload.
+
+    These come from the watch's "How did that feel?" prompt and live in
+    summaryDTO on the /activity/{id} detail endpoint — NOT the activity-list
+    summary the poller iterates. Garmin stores both on a 0–100 scale; RPE is
+    rescaled to the 1–10 the coach reports against (logged 3/10 → stored 30 →
+    3.0). Feel stays 0–100 (format_feel maps it to Weak/Normal/Strong/etc.).
+    """
+    summary = (detail or {}).get("summaryDTO") or {}
+    raw_rpe = summary.get("directWorkoutRpe")
+    feel = summary.get("directWorkoutFeel")
+    rpe = (raw_rpe / 10) if raw_rpe is not None else None
+    return {"rpe": rpe, "feel": feel}
+
+
 def poll():
     db = Database(DB_PATH)
     try:
@@ -124,10 +140,16 @@ def poll():
             or (activity.get("summaryDTO") or {}).get("trainingLoad")
         )
 
-        # Post-run RPE + Feel come from the watch's "How did that feel?" prompt.
-        # RPE: 1-10 scale; Feel: 0-100 (Very Weak / Weak / Normal / Strong / Very Strong, step 25).
-        rpe = activity.get("directWorkoutRpe") or activity.get("workoutRpe")
-        feel = activity.get("directWorkoutFeel") or activity.get("workoutFeel")
+        # Post-run RPE + Feel live in the activity-detail summaryDTO, not the
+        # list payload above — fetch the detail and pull them from there.
+        try:
+            detail = garmin.get_activity_detail(activity_id)
+        except Exception as e:
+            log.warning("Detail fetch failed for %s: %s", activity_id, e)
+            detail = None
+        subjective = extract_subjective_fields(detail)
+        rpe = subjective["rpe"]
+        feel = subjective["feel"]
 
         # Capture the runner's UTC offset at the time of the run, so the coach
         # prompt can later derive "today in the runner's local time" without

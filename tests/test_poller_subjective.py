@@ -8,7 +8,7 @@ even when the runner logged them. Garmin also stores RPE on a 0–100 scale
 (logged 3/10 → 30), which must be rescaled to the 1–10 the coach reports.
 """
 
-from src.poller import extract_subjective_fields
+from src.poller import extract_running_dynamics, extract_subjective_fields
 
 
 # Real summaryDTO slice captured from activity 22944722639 (2026-05-20).
@@ -43,3 +43,22 @@ def test_rpe_zero_is_preserved_not_dropped():
     fields = extract_subjective_fields({"summaryDTO": {"directWorkoutRpe": 0, "directWorkoutFeel": 0}})
     assert fields["rpe"] == 0.0
     assert fields["feel"] == 0
+
+
+# Running dynamics live in the activity-LIST payload (unlike RPE/Feel). Real
+# values captured from activity 22944722639 (2026-05-20).
+def test_running_dynamics_extracted_from_list_payload():
+    fields = extract_running_dynamics({
+        "avgGroundContactTime": 272.79998779296875,
+        "avgStrideLength": 87.27999877929688,
+        "avgVerticalOscillation": 7.890000152587891,
+    })
+    assert fields["ground_contact_ms"] == 272.79998779296875
+    assert fields["stride_length_cm"] == 87.27999877929688
+    assert fields["vertical_oscillation_cm"] == 7.890000152587891
+
+
+def test_running_dynamics_none_when_device_lacks_pod():
+    assert extract_running_dynamics({}) == {
+        "ground_contact_ms": None, "stride_length_cm": None, "vertical_oscillation_cm": None,
+    }

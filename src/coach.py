@@ -379,6 +379,68 @@ def compute_easy_run_trend(plan: TrainingPlan, recent_runs: list[dict], n: int =
     return {"runs": rows}
 
 
+def compute_cadence_context(activity: dict, recent_runs: list[dict], n: int = 5) -> dict | None:
+    """This run's cadence + running dynamics against the runner's OWN recent baseline.
+
+    Baseline = mean cadence of up to `n` prior runs (the current run is excluded
+    by start_time so it can't anchor its own baseline). This lets the coach say
+    "down from your usual 176" instead of prescribing a generic target spm.
+    Running dynamics (ground contact, step length, vertical oscillation) are
+    passed through in Garmin's native units; the prompt supplies the reference
+    bands so the model interprets rather than invents them.
+
+    Returns None if the current run has no cadence to anchor on.
+    """
+    current = activity.get("avg_cadence")
+    if not current:
+        return None
+    cur_start = activity.get("start_time") or ""
+    prior = [
+        r.get("avg_cadence")
+        for r in recent_runs
+        if r.get("avg_cadence") and r.get("start_time") != cur_start
+    ][:n]
+    baseline = round(sum(prior) / len(prior), 1) if prior else None
+    return {
+        "current": round(current, 1),
+        "baseline": baseline,
+        "n_baseline": len(prior),
+        "delta": round(current - baseline, 1) if baseline is not None else None,
+        "ground_contact_ms": activity.get("ground_contact_ms"),
+        "stride_length_cm": activity.get("stride_length_cm"),
+        "vertical_oscillation_cm": activity.get("vertical_oscillation_cm"),
+    }
+
+
+def format_cadence_context(ctx: dict | None) -> str:
+    """One-line cadence-vs-baseline + running-dynamics summary for the prompt.
+
+    Includes reference bands inline so the model judges form against real ranges
+    instead of a stock 175–178 target. Omits any metric the device didn't record.
+    """
+    if not ctx:
+        return "Cadence not recorded"
+    parts = [f"Cadence {ctx['current']} spm"]
+    if ctx["baseline"] is not None:
+        d = ctx["delta"]
+        parts.append(
+            f"vs your recent baseline {ctx['baseline']} spm over {ctx['n_baseline']} runs "
+            f"({'+' if d >= 0 else ''}{d})"
+        )
+    else:
+        parts.append("(no prior baseline yet)")
+    gct = ctx.get("ground_contact_ms")
+    if gct:
+        parts.append(f"ground contact {float(gct):.0f}ms [typical 200–300, lower=less braking]")
+    vo = ctx.get("vertical_oscillation_cm")
+    if vo:
+        parts.append(f"vertical oscillation {float(vo):.1f}cm [typical 6–13, lower=less bounce]")
+    sl = ctx.get("stride_length_cm")
+    if sl:
+        parts.append(f"step length {float(sl):.0f}cm")
+    return " | ".join(parts)
+
+
 def compute_weekly_target(plan: TrainingPlan, db: Database, today: date) -> dict | None:
     """Where the runner stands against this week's prescribed mileage target.
 
@@ -781,6 +843,9 @@ COACHING STYLE:
                 bits.append(f"Feel: {feel_label}")
             subjective_text = " | ".join(bits)
 
+        # Cadence + running dynamics against the runner's own recent baseline
+        cadence_text = format_cadence_context(compute_cadence_context(activity, recent))
+
         user_prompt = f"""Analyze this run and provide coaching feedback.
 
 TODAY'S RUN ({weekday_name}):
@@ -805,6 +870,9 @@ SUBJECTIVE EFFORT (from watch post-run prompt):
 RUN QUALITY:
 - HR Drift: {drift_text}
 - Zone Distribution: {zone_dist_text}
+
+RUNNING FORM:
+- {cadence_text}
 
 LOAD CONTEXT:
 - {acr_text}
@@ -838,7 +906,7 @@ Provide:
 5. Trend read — if easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it
 6. Recovery & load read — flag if ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or HRV/sleep poor. ACR and the trailing-7d volume delta use the same rolling window, so read them together as ONE load signal — never present them as a contradiction ("ACR high even though volume down"). If they disagree, you've misread one. Also weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), which is the real injury risk during a rebuild.
 7. Weekly target check — current km vs target with the *prescribed runs* still left this week (do not divide remaining km by calendar days or suggest a per-day average; rest days exist and the runner doesn't run every day). Flag only if the remaining scheduled runs can't realistically close the gap.
-8. Cadence & elevation note (if relevant)
+8. Form & elevation note — compare cadence to the runner's OWN recent baseline (in RUNNING FORM); comment only on a meaningful move from it (≥3 spm) and frame it as "down/up from your usual N", never a generic target cadence. Mention ground contact or vertical oscillation only if it sits notably outside the typical band shown; otherwise stay quiet on form. Note elevation only if it shaped the run.
 9. One thing done well
 10. One thing to watch or improve
 11. Brief look-ahead to next scheduled run"""

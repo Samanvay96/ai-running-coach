@@ -104,6 +104,10 @@ MIGRATIONS = [
     "ALTER TABLE activities ADD COLUMN rpe REAL",
     "ALTER TABLE activities ADD COLUMN feel INTEGER",
     "ALTER TABLE activities ADD COLUMN tz_offset_minutes INTEGER",
+    # Running dynamics (Garmin units): ground contact ms, step length cm, vertical oscillation cm.
+    "ALTER TABLE activities ADD COLUMN ground_contact_ms REAL",
+    "ALTER TABLE activities ADD COLUMN stride_length_cm REAL",
+    "ALTER TABLE activities ADD COLUMN vertical_oscillation_cm REAL",
 ]
 
 
@@ -149,7 +153,10 @@ class Database:
                       weather_json: str | None = None,
                       rpe: float | None = None,
                       feel: int | None = None,
-                      tz_offset_minutes: int | None = None) -> None:
+                      tz_offset_minutes: int | None = None,
+                      ground_contact_ms: float | None = None,
+                      stride_length_cm: float | None = None,
+                      vertical_oscillation_cm: float | None = None) -> None:
         self.conn.execute(
             """INSERT OR IGNORE INTO activities
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
@@ -157,15 +164,17 @@ class Database:
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
              raw_json, splits_json, training_load, hr_zones_json,
              temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
-             rpe, feel, tz_offset_minutes)
+             rpe, feel, tz_offset_minutes,
+             ground_contact_ms, stride_length_cm, vertical_oscillation_cm)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (activity_id, start_time, activity_type, distance_km, duration_seconds,
              avg_pace, avg_hr, max_hr, calories, aerobic_te, vo2max,
              avg_cadence, elevation_gain, elevation_loss, anaerobic_te,
              raw_json, splits_json, training_load, hr_zones_json,
              temp_c, apparent_temp_c, humidity_pct, wind_kph, weather_label, weather_json,
-             rpe, feel, tz_offset_minutes)
+             rpe, feel, tz_offset_minutes,
+             ground_contact_ms, stride_length_cm, vertical_oscillation_cm)
         )
         self.conn.commit()
 

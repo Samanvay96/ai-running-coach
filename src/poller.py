@@ -80,6 +80,21 @@ def extract_subjective_fields(detail: dict | None) -> dict:
     return {"rpe": rpe, "feel": feel}
 
 
+def extract_running_dynamics(activity: dict) -> dict:
+    """Pull Garmin running-dynamics fields from the activity-list payload.
+
+    Native Garmin units, stored as-is: ground contact time in ms, step length
+    in cm (Garmin labels it "stride" but it's per-step, matching the steps/min
+    cadence), vertical oscillation in cm. Absent on devices without a compatible
+    HRM/pod, so each may be None.
+    """
+    return {
+        "ground_contact_ms": activity.get("avgGroundContactTime"),
+        "stride_length_cm": activity.get("avgStrideLength"),
+        "vertical_oscillation_cm": activity.get("avgVerticalOscillation"),
+    }
+
+
 def poll():
     db = Database(DB_PATH)
     try:
@@ -150,6 +165,7 @@ def poll():
         subjective = extract_subjective_fields(detail)
         rpe = subjective["rpe"]
         feel = subjective["feel"]
+        dynamics = extract_running_dynamics(activity)
 
         # Capture the runner's UTC offset at the time of the run, so the coach
         # prompt can later derive "today in the runner's local time" without
@@ -188,6 +204,9 @@ def poll():
             rpe=rpe,
             feel=feel,
             tz_offset_minutes=tz_offset_minutes,
+            ground_contact_ms=dynamics["ground_contact_ms"],
+            stride_length_cm=dynamics["stride_length_cm"],
+            vertical_oscillation_cm=dynamics["vertical_oscillation_cm"],
         )
 
         # Build activity dict for coach (matches what coach.analyze_run expects)
@@ -215,6 +234,9 @@ def poll():
             "weather_label": weather_fields["label"],
             "rpe": rpe,
             "feel": feel,
+            "ground_contact_ms": dynamics["ground_contact_ms"],
+            "stride_length_cm": dynamics["stride_length_cm"],
+            "vertical_oscillation_cm": dynamics["vertical_oscillation_cm"],
         }
 
         try:

@@ -72,6 +72,9 @@ def main() -> int:
         "weather_label": row["weather_label"] if "weather_label" in cols else None,
         "rpe": row["rpe"] if "rpe" in cols else None,
         "feel": row["feel"] if "feel" in cols else None,
+        "ground_contact_ms": row["ground_contact_ms"] if "ground_contact_ms" in cols else None,
+        "stride_length_cm": row["stride_length_cm"] if "stride_length_cm" in cols else None,
+        "vertical_oscillation_cm": row["vertical_oscillation_cm"] if "vertical_oscillation_cm" in cols else None,
     }
 
     db = Database(DB_PATH)

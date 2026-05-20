@@ -19,8 +19,10 @@ from src.coach import (
     _extract_text,
     _format_weekly_target,
     compute_acr,
+    compute_cadence_context,
     compute_mileage_delta,
     compute_weekly_target,
+    format_cadence_context,
     compute_zone_distribution,
     format_feel,
     format_recovery,
@@ -463,6 +465,49 @@ def test_format_weekly_target_handles_no_runs_left():
 
 def test_format_weekly_target_handles_outside_plan_window():
     assert _format_weekly_target(None) == "Outside training plan window"
+
+
+def test_cadence_context_baselines_against_prior_runs_only():
+    activity = {
+        "start_time": "2026-05-20 08:04:40", "avg_cadence": 172.0,
+        "ground_contact_ms": 272.8, "stride_length_cm": 87.3,
+        "vertical_oscillation_cm": 7.9,
+    }
+    recent = [
+        {"start_time": "2026-05-20 08:04:40", "avg_cadence": 172.0},  # the run itself — excluded
+        {"start_time": "2026-05-18 07:30:57", "avg_cadence": 176.0},
+        {"start_time": "2026-05-16 08:35:10", "avg_cadence": 178.0},
+    ]
+    ctx = compute_cadence_context(activity, recent)
+    assert ctx["current"] == 172.0
+    assert ctx["baseline"] == 177.0       # mean of 176 + 178, NOT diluted by today
+    assert ctx["n_baseline"] == 2
+    assert ctx["delta"] == -5.0           # down 5 spm from the runner's own usual
+    assert ctx["ground_contact_ms"] == 272.8
+
+
+def test_cadence_context_none_without_cadence():
+    assert compute_cadence_context({"start_time": "x", "avg_cadence": None}, []) is None
+
+
+def test_format_cadence_context_grounds_in_baseline_not_generic_target():
+    ctx = compute_cadence_context(
+        {"start_time": "d1", "avg_cadence": 172.0, "ground_contact_ms": 272.8,
+         "vertical_oscillation_cm": 7.9, "stride_length_cm": 87.3},
+        [{"start_time": "d0", "avg_cadence": 176.0}],
+    )
+    out = format_cadence_context(ctx)
+    assert "your recent baseline 176.0 spm" in out
+    assert "-4.0" in out
+    assert "ground contact 273ms" in out
+    assert "175" not in out and "178" not in out  # no stock target leaks in
+
+
+def test_format_cadence_context_omits_missing_dynamics():
+    ctx = compute_cadence_context({"start_time": "d1", "avg_cadence": 170.0}, [])
+    out = format_cadence_context(ctx)
+    assert "no prior baseline yet" in out
+    assert "ground contact" not in out and "oscillation" not in out
 
 
 def test_mileage_delta_uses_trailing_window_and_agrees_with_acr():

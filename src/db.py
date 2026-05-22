@@ -191,6 +191,15 @@ class Database:
         )
         self.conn.commit()
 
+    def update_activity_subjective(self, activity_id: int, rpe: float | None,
+                                   feel: int | None) -> None:
+        """Set post-run RPE/Feel on an existing activity row (backfill path)."""
+        self.conn.execute(
+            "UPDATE activities SET rpe = ?, feel = ? WHERE activity_id = ?",
+            (rpe, feel, activity_id)
+        )
+        self.conn.commit()
+
     def get_recent_activities(self, limit: int = 10) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM activities ORDER BY start_time DESC LIMIT ?", (limit,)

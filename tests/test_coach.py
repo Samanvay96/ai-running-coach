@@ -332,6 +332,29 @@ def test_get_latest_tz_offset_only_returns_recent():
         db.close()
 
 
+def test_update_activity_subjective_round_trips():
+    """The backfill path must set rpe/feel on an existing row."""
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(_P(tmp) / "test.db")
+        db.save_activity(
+            activity_id=42, start_time="2026-05-14 09:30:00", activity_type="running",
+            distance_km=8.0, duration_seconds=3000, avg_pace="6:15",
+            avg_hr=150, max_hr=165, calories=500, aerobic_te=3.0,
+            vo2max=None, raw_json="{}", splits_json="[]",
+        )
+        # Pre-condition: stored NULL (the bug we're recovering from)
+        before = db.conn.execute("SELECT rpe, feel FROM activities WHERE activity_id=42").fetchone()
+        assert before["rpe"] is None and before["feel"] is None
+
+        db.update_activity_subjective(42, rpe=3.0, feel=75)
+        after = db.conn.execute("SELECT rpe, feel FROM activities WHERE activity_id=42").fetchone()
+        assert after["rpe"] == 3.0
+        assert after["feel"] == 75
+        db.close()
+
+
 def test_backfill_tz_offsets_populates_from_raw_json():
     """Existing rows without tz_offset_minutes should pick it up from raw_json on next open."""
     import tempfile

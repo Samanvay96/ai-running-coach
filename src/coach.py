@@ -35,6 +35,21 @@ def _extract_text(response) -> str:
     )
 
 
+def _stream_message(client, **kwargs):
+    """Create a message via streaming and return the final Message.
+
+    Adaptive thinking can run for well over a minute before any output bytes
+    arrive. A non-streaming request sits idle that whole time and an upstream
+    proxy closes the connection, surfacing as APIConnectionError ("Server
+    disconnected without sending a response") — which is exactly how the
+    2026-06-04 per-run analysis failed. Streaming keeps the connection alive
+    with incremental events. The final Message has the same shape as
+    messages.create returns, so _extract_text works on it unchanged.
+    """
+    with client.messages.stream(**kwargs) as stream:
+        return stream.get_final_message()
+
+
 def resolve_runner_today(db: Database, within_days: int = 14) -> tuple[date, str]:
     """Return (today, source_label) for the runner's current timezone.
 
@@ -935,9 +950,13 @@ EMOJIS — keep them deterministic and accessible, not decorative:
 FORMATTING: put each bold header (with its emoji) on its OWN line, content on the
 next line(s), with a blank line between sections — never "**Header:** text…" inline."""
 
-        response = self.client.messages.create(
+        response = _stream_message(
+            self.client,
             model=MODEL,
-            max_tokens=4096,
+            # Thinking tokens count against max_tokens; adaptive thinking on a
+            # rich prompt has been observed to use ~4.9k before any review text,
+            # so 4096 left zero room for output. 8192 gives the review headroom.
+            max_tokens=8192,
             thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
             system=[
@@ -1079,9 +1098,13 @@ Provide:
 
 Keep it Telegram-friendly (under 3000 chars)."""
 
-        response = self.client.messages.create(
+        response = _stream_message(
+            self.client,
             model=MODEL,
-            max_tokens=4096,
+            # See analyze_run: adaptive thinking can exhaust a 4096 budget
+            # before emitting the summary, and the non-streaming idle wait
+            # trips an upstream disconnect. Stream + headroom on both counts.
+            max_tokens=8192,
             thinking={"type": "adaptive"},
             output_config={"effort": "medium"},
             system=[

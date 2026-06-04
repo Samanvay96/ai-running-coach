@@ -49,6 +49,18 @@ def _response(blocks: list, stop_reason: str = "end_turn") -> SimpleNamespace:
     )
 
 
+def _wire_stream(client, response):
+    """Wire a MagicMock client so coach's _stream_message yields `response`.
+
+    The analyze_run / weekly_summary call sites now stream (see the 2026-06-04
+    fix): `with client.messages.stream(**kw) as s: return s.get_final_message()`.
+    Mirror that shape so call_args land on `.stream`, not `.create`.
+    """
+    ctx = client.messages.stream.return_value
+    ctx.__enter__.return_value.get_final_message.return_value = response
+    return client.messages.stream
+
+
 # ---------------- _extract_text ----------------
 
 
@@ -103,11 +115,11 @@ def coach():
 
 
 def test_analyze_run_happy_path_returns_text(coach):
-    """End-to-end: analyze_run builds a prompt, calls API, extracts text."""
-    coach.client.messages.create.return_value = _response([
+    """End-to-end: analyze_run builds a prompt, streams the API, extracts text."""
+    _wire_stream(coach.client, _response([
         _block("thinking", "..."),
         _block("text", "Verdict: solid run."),
-    ])
+    ]))
     activity = {
         "start_time": "2026-04-28 09:23:45",
         "distance_km": 4.0,
@@ -120,12 +132,13 @@ def test_analyze_run_happy_path_returns_text(coach):
     }
     result = coach.analyze_run(activity)
     assert result == "Verdict: solid run."
-    assert coach.client.messages.create.called
+    assert coach.client.messages.stream.called
 
     # Sanity-check the request shape that the production bug depended on
-    call_kwargs = coach.client.messages.create.call_args.kwargs
-    assert call_kwargs["max_tokens"] >= 4096, (
-        "max_tokens must stay generous to leave headroom for adaptive thinking + text"
+    call_kwargs = coach.client.messages.stream.call_args.kwargs
+    assert call_kwargs["max_tokens"] >= 8192, (
+        "max_tokens must leave headroom for adaptive thinking + text — 4096 was "
+        "fully consumed by thinking on 2026-06-04, leaving no review (stop=max_tokens)"
     )
     assert call_kwargs["thinking"] == {"type": "adaptive"}, (
         "budget_tokens is rejected by the API for adaptive — see Apr 28 regression"
@@ -135,8 +148,8 @@ def test_analyze_run_happy_path_returns_text(coach):
 def test_analyze_run_propagates_no_text_failure(coach):
     """If the model returns only thinking, the failure must reach the caller
     (poller's outer try/except) instead of being silently swallowed."""
-    coach.client.messages.create.return_value = _response(
-        [_block("thinking", "...")], stop_reason="max_tokens"
+    _wire_stream(
+        coach.client, _response([_block("thinking", "...")], stop_reason="max_tokens")
     )
     activity = {
         "start_time": "2026-04-28 09:23:45",
@@ -150,6 +163,75 @@ def test_analyze_run_propagates_no_text_failure(coach):
     }
     with pytest.raises(RuntimeError, match="max_tokens"):
         coach.analyze_run(activity)
+
+
+# ---------------- streaming (2026-06-04 disconnect regression) ----------------
+#
+# The per-run analysis failed on 2026-06-04 with APIConnectionError ("Server
+# disconnected without sending a response"). Root cause: the non-streaming
+# request sat idle for ~180s while adaptive thinking ran, and an upstream proxy
+# closed the connection. Streaming keeps the connection alive with incremental
+# events. These tests lock in that the heavy thinking call sites stream and that
+# the helper drains the context manager correctly.
+
+
+def test_stream_message_drains_context_manager_and_returns_final():
+    """_stream_message must open the stream as a context manager, return its
+    final message, and exit the manager (releasing the connection)."""
+    from src.coach import _stream_message
+
+    client = MagicMock()
+    sentinel = _response([_block("text", "done")])
+    cm = client.messages.stream.return_value
+    cm.__enter__.return_value.get_final_message.return_value = sentinel
+
+    out = _stream_message(client, model="m", max_tokens=8192)
+
+    assert out is sentinel
+    client.messages.stream.assert_called_once_with(model="m", max_tokens=8192)
+    cm.__enter__.assert_called_once()
+    cm.__exit__.assert_called_once()  # connection released even on the happy path
+
+
+def test_analyze_run_streams_rather_than_blocking(coach):
+    """The fix: analyze_run must stream, never the blocking create() that the
+    upstream idle timeout killed mid-thinking on 2026-06-04."""
+    _wire_stream(coach.client, _response([
+        _block("thinking", "long adaptive reasoning that used to outlive the idle timeout"),
+        _block("text", "Verdict: ok."),
+    ]))
+    activity = {
+        "start_time": "2026-06-04 10:22:21",
+        "distance_km": 7.0,
+        "duration_seconds": 2517,
+        "avg_pace_min_km": "5:59",
+        "avg_hr": 160,
+        "max_hr": 183,
+        "splits_json": "[]",
+        "hr_zones_json": None,
+    }
+    result = coach.analyze_run(activity)
+    assert result == "Verdict: ok."
+    assert coach.client.messages.stream.called
+    assert not coach.client.messages.create.called, (
+        "non-streaming create() is what the upstream proxy disconnected — must stream"
+    )
+
+
+def test_weekly_summary_streams_with_headroom(coach):
+    """weekly_summary shares analyze_run's adaptive-thinking shape, so it carries
+    the same disconnect/truncation risk and must stream with the same headroom."""
+    _wire_stream(coach.client, _response([
+        _block("thinking", "..."),
+        _block("text", "Week in review: solid."),
+    ]))
+    result = coach.weekly_summary("2026-06-01", "2026-06-07")
+    assert result == "Week in review: solid."
+    assert coach.client.messages.stream.called
+    assert not coach.client.messages.create.called
+    call_kwargs = coach.client.messages.stream.call_args.kwargs
+    assert call_kwargs["max_tokens"] >= 8192
+    assert call_kwargs["thinking"] == {"type": "adaptive"}
 
 
 # ---------------- weather + RPE/feel formatting ----------------
@@ -386,7 +468,7 @@ def test_backfill_tz_offsets_populates_from_raw_json():
 
 def test_analyze_run_prompt_includes_conditions_and_subjective(coach):
     """Both new prompt sections must reach the model when fields are present."""
-    coach.client.messages.create.return_value = _response([_block("text", "ok")])
+    _wire_stream(coach.client, _response([_block("text", "ok")]))
     activity = {
         "start_time": "2026-05-14 09:23:45",
         "distance_km": 8.0,
@@ -403,7 +485,7 @@ def test_analyze_run_prompt_includes_conditions_and_subjective(coach):
         "feel": 25,  # "Weak"
     }
     coach.analyze_run(activity)
-    prompt = coach.client.messages.create.call_args.kwargs["messages"][-1]["content"]
+    prompt = coach.client.messages.stream.call_args.kwargs["messages"][-1]["content"]
     assert "CONDITIONS:" in prompt
     assert "28°C" in prompt
     assert "Sunny" in prompt

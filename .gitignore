@@ -1,4 +1,9 @@
-Lisbon Marathon Sub4 Plan.xlsx
+# Training plan workbooks hold personal training data (targets, schedule,
+# injury notes) and are deliberately kept out of git. The earlier rule named
+# only the original spaced filename, so every versioned file since
+# (Lisbon_Marathon_*_v5/v6/v7.xlsx) slipped past it and got committed.
+*.xlsx
+
 .env
 data/
 __pycache__/

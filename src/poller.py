@@ -267,38 +267,63 @@ def poll():
     else:
         log.info("Processed %d new activities.", new_count)
 
-    # Fetch and store training status snapshot + lactate threshold
+    # Fetch and store training status snapshot + lactate threshold.
+    # Both payloads are nested; see parse_training_status / parse_lactate_threshold
+    # for the field maps. Reading them off the top level (as this used to) yields
+    # None for every field and writes an all-NULL row.
     try:
+        from .garmin_client import parse_lactate_threshold, parse_training_status
         ts = garmin.get_training_status()
-        lt = garmin.get_lactate_threshold()
-        lt_pace = None
-        lt_hr = None
-        if lt:
-            # lactate threshold response shape varies; try common keys
-            lt_speed = lt.get("calendarDate") and (
-                lt.get("lactateThresholdSpeed")
-                or lt.get("lactate_threshold_speed_meters_per_second")
-            )
-            if lt_speed:
-                # m/s -> min/km string handled later; here keep as min/km float
-                secs_per_km = 1000 / float(lt_speed)
-                lt_pace = round(secs_per_km / 60, 2)  # decimal minutes/km
-            lt_hr = lt.get("lactateThresholdHeartRate") or lt.get("heartRate")
+        lt = parse_lactate_threshold(garmin.get_lactate_threshold())
+        parsed = parse_training_status(ts)
 
         if ts:
             db.save_training_status(
-                snapshot_date=date.today().isoformat(),
-                training_load_7d=ts.get("weeklyTrainingLoad"),
-                recovery_time_hours=ts.get("recoveryTimeInHours"),
-                vo2max=ts.get("vo2MaxValue"),
-                training_status_label=ts.get("trainingStatusLabel"),
+                snapshot_date=parsed.get("snapshot_date") or date.today().isoformat(),
+                training_load_7d=parsed.get("training_load_7d"),
+                recovery_time_hours=parsed.get("recovery_time_hours"),
+                vo2max=parsed.get("vo2max"),
+                training_status_label=parsed.get("training_status_label"),
                 raw_json=json.dumps(ts),
-                lt_pace_min_km=lt_pace,
-                lt_hr=lt_hr,
+                lt_pace_min_km=lt.get("lt_pace_min_km"),
+                lt_hr=lt.get("lt_hr"),
+                lt_date=lt.get("lt_date"),
             )
-            log.info("Training status snapshot saved (LT pace=%s, LT HR=%s)", lt_pace, lt_hr)
+            log.info(
+                "Training status saved (VO2max=%s, load7d=%s, status=%s, LT %s/km @ %s bpm from %s)",
+                parsed.get("vo2max"), parsed.get("training_load_7d"),
+                parsed.get("training_status_label"),
+                lt.get("lt_pace_min_km"), lt.get("lt_hr"), lt.get("lt_date"),
+            )
     except Exception as e:
         log.warning("Failed to save training status: %s", e)
+
+    # Snapshot Garmin's configured HR zones. These drive the Z2 band the coach
+    # quotes; a failure here is non-fatal because resolve_z2_bounds falls back
+    # to the plan's own percentages.
+    try:
+        from .garmin_client import select_hr_zone_entry
+        entry = select_hr_zone_entry(garmin.get_hr_zones())
+        if entry:
+            db.save_hr_zones(
+                fetched_date=date.today().isoformat(),
+                sport=entry.get("sport"),
+                training_method=entry.get("trainingMethod"),
+                max_hr=entry.get("maxHeartRateUsed"),
+                resting_hr=entry.get("restingHeartRateUsed"),
+                floors={n: entry.get(f"zone{n}Floor") for n in range(1, 6)},
+                raw_json=json.dumps(entry),
+            )
+            log.info(
+                "HR zones saved (sport=%s, max=%s, rest=%s, Z2 floor=%s, Z3 floor=%s)",
+                entry.get("sport"), entry.get("maxHeartRateUsed"),
+                entry.get("restingHeartRateUsed"),
+                entry.get("zone2Floor"), entry.get("zone3Floor"),
+            )
+        else:
+            log.warning("HR zones payload unusable — keeping previous snapshot")
+    except Exception as e:
+        log.warning("Failed to save HR zones: %s", e)
 
     # Fetch and store the most recent complete night's wellness (sleep, HRV, RHR).
     # Garmin dates a sleep record by the wake-up (calendar) date, so TODAY's record

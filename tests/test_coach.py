@@ -9,6 +9,7 @@ Run with: `.venv/bin/python -m pytest tests/`
 """
 
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -33,6 +34,18 @@ from src.coach import (
 from src.config import DB_PATH, TRAINING_PLAN_PATH
 from src.db import Database
 from src.training_plan import TrainingPlan
+
+
+def _plan_or_skip() -> TrainingPlan:
+    """Load the runner's real plan, or skip.
+
+    The workbooks hold personal training data and are gitignored, so they exist
+    locally but not in a fresh clone. These tests exercise the coach against the
+    live plan; without it there is nothing meaningful to assert.
+    """
+    if not Path(TRAINING_PLAN_PATH).exists():
+        pytest.skip(f"{TRAINING_PLAN_PATH.name} not present (gitignored — personal training data)")
+    return TrainingPlan(str(TRAINING_PLAN_PATH))
 
 
 def _block(btype: str, text: str | None = None) -> SimpleNamespace:
@@ -107,7 +120,7 @@ def test_extract_text_raises_on_empty_content():
 def coach():
     """Real plan + DB, mocked Anthropic client. Coach reads from DB but never
     writes during analyze_run, so this is safe against prod data."""
-    plan = TrainingPlan(str(TRAINING_PLAN_PATH))
+    plan = _plan_or_skip()
     db = Database(DB_PATH)
     c = Coach(api_key="test-key", plan=plan, db=db)
     c.client = MagicMock()
@@ -520,7 +533,7 @@ def test_chat_returns_text_with_rich_context(coach):
 
 
 def test_compute_weekly_target_excludes_rest_days_from_remaining_runs():
-    plan = TrainingPlan(str(TRAINING_PLAN_PATH))
+    plan = _plan_or_skip()
     db = Database(DB_PATH)
     # 2026-05-18 is a Monday; the v5 plan schedules runs on Mon/Wed/Fri for
     # this base-bridge week, so after Monday only Wed + Fri should remain.

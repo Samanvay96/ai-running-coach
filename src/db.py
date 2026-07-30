@@ -84,6 +84,25 @@ CREATE TABLE IF NOT EXISTS prerun_sent (
     sent_at TEXT DEFAULT CURRENT_TIMESTAMP,
     brief_text TEXT
 );
+
+-- Heart rate zones as configured on Garmin. These are the numbers Garmin's own
+-- per-activity zone buckets are built from, so storing them keeps the band we
+-- quote consistent with the time-in-zone percentages we already ingest.
+-- One snapshot per day so a change (max HR edit, RHR auto-update) is traceable.
+CREATE TABLE IF NOT EXISTS hr_zones (
+    fetched_date TEXT PRIMARY KEY,
+    sport TEXT,
+    training_method TEXT,
+    max_hr INTEGER,
+    resting_hr INTEGER,
+    zone1_floor INTEGER,
+    zone2_floor INTEGER,
+    zone3_floor INTEGER,
+    zone4_floor INTEGER,
+    zone5_floor INTEGER,
+    raw_json TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 MIGRATIONS = [
@@ -108,6 +127,9 @@ MIGRATIONS = [
     "ALTER TABLE activities ADD COLUMN ground_contact_ms REAL",
     "ALTER TABLE activities ADD COLUMN stride_length_cm REAL",
     "ALTER TABLE activities ADD COLUMN vertical_oscillation_cm REAL",
+    # Garmin auto-detects lactate threshold only during hard sustained efforts,
+    # so the estimate can be months stale. Store its date to judge relevance.
+    "ALTER TABLE training_status ADD COLUMN lt_date TEXT",
 ]
 
 
@@ -244,20 +266,47 @@ class Database:
                              recovery_time_hours: int | None, vo2max: float | None,
                              training_status_label: str | None, raw_json: str,
                              lt_pace_min_km: float | None = None,
-                             lt_hr: int | None = None) -> None:
+                             lt_hr: int | None = None,
+                             lt_date: str | None = None) -> None:
         self.conn.execute(
             """INSERT INTO training_status
             (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json,
-             lt_pace_min_km, lt_hr)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+             lt_pace_min_km, lt_hr, lt_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (snapshot_date, training_load_7d, recovery_time_hours, vo2max, training_status_label, raw_json,
-             lt_pace_min_km, lt_hr)
+             lt_pace_min_km, lt_hr, lt_date)
         )
         self.conn.commit()
 
     def get_latest_training_status(self) -> dict | None:
+        # Tie-break on id: the poller inserts a row per poll, so a day holds many
+        # rows with the same snapshot_date. Ordering by date alone let SQLite
+        # return any of them — in practice the oldest — so the freshest snapshot
+        # was invisible and stale (or all-NULL) rows won.
         row = self.conn.execute(
-            "SELECT * FROM training_status ORDER BY snapshot_date DESC LIMIT 1"
+            "SELECT * FROM training_status ORDER BY snapshot_date DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_hr_zones(self, fetched_date: str, sport: str | None,
+                      training_method: str | None, max_hr: int | None,
+                      resting_hr: int | None, floors: dict[int, int | None],
+                      raw_json: str) -> None:
+        """Store today's HR zone snapshot. Re-running the poller replaces it."""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO hr_zones
+            (fetched_date, sport, training_method, max_hr, resting_hr,
+             zone1_floor, zone2_floor, zone3_floor, zone4_floor, zone5_floor, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (fetched_date, sport, training_method, max_hr, resting_hr,
+             floors.get(1), floors.get(2), floors.get(3), floors.get(4), floors.get(5),
+             raw_json)
+        )
+        self.conn.commit()
+
+    def get_latest_hr_zones(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM hr_zones ORDER BY fetched_date DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
 

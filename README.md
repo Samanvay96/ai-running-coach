@@ -105,17 +105,24 @@ RUNNER_TIMEZONE=Europe/London
 
 > 💡 **Getting your Telegram chat ID:** Send a message to your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` — your chat ID is in the response.
 >
-> 🫀 **`RUNNER_AGE`** is used to derive `MAX_HR = 220 − age` for Z2 zone math (Karvonen / %HRR formula). The 220−age estimate is approximate (±10 bpm typical).
+> 🫀 **`RUNNER_AGE`** derives `MAX_HR = 220 − age` as a **last-resort fallback only**. The Zone 2 band normally comes from the zones you have configured on Garmin (`/biometric-service/heartRateZones`), snapshotted daily by the poller into the `hr_zones` table and resolved by `coach.resolve_z2_bounds`. This matters: Garmin's own per-activity zone buckets — which the time-in-zone percentages are computed from — are derived from *your configured* max HR, so deriving a different band from 220−age makes the coach quote a range that contradicts the percentages beside it. For this runner 220−age gives 190 where Garmin has 199, a 5 bpm error in the Z2 ceiling that made correctly-easy runs read as too hard. The prompt always states which source was used, so a failed fetch is visible rather than silent.
 >
 > 🌍 **`RUNNER_TIMEZONE`** is a *fallback only*. The coach normally auto-derives your current timezone from the UTC offset of your latest activity (within 14 days), so you don't need to update this when travelling. Used only when there's no recent run.
 
 ### 3️⃣ Add your training plan
 
-Place your training plan Excel file in the project root. The parser expects an `.xlsx` file with three sheets:
+Place your training plan Excel file in the project root. The parser expects an `.xlsx` file with these sheets:
 
-- 📋 **Training Plan** — week-by-week schedule with columns: `Week`, `Dates`, `Phase`, `Mon`, `Tue`, `Thu`, `Sat`, `Weekly km`, `Notes`
-- 🎚️ **Pace Guide** — pace zones with heart rate targets (e.g. `Zone 2 (60-70% max HR)`)
-- 🏁 **Race Day** — pacing strategy and fueling plan
+- 📋 **Training Plan** — week-by-week schedule. Row 1 is the plan title, row 2 the goal line (`Race: … | Target: 4:45–5:00 (~6:50/km) | …`), row 3 the revision note. Below that, a header row starting with `Week`, then columns `Week`, `Dates`, `Phase`, `Mon`…`Sun`, `Weekly km`, … , `Notes`. Rows whose first cell isn't a number are treated as phase banners (`PHASE 3: BASE REBUILD — …`) and attach to the weeks beneath them.
+- 🎚️ **Pace Guide** — pace zones under a header row starting with `Run Type`, with heart rate targets (e.g. `Zone 2 (60-70% max HR)`)
+- 🏁 **Race Day Plan** — splits under a `Split` header row, fuelling under a `When` header row
+- 📈 **Benchmarks** *(optional)* — progress checkpoints under a `Checkpoint` (or legacy `Distance`) header row
+
+Tables are located by their header cell, not by fixed row numbers, so inserting or removing rows above them is safe.
+
+**The goal is read from the sheet, not from code.** `Target:` in the goal line drives every coaching prompt, so changing the target in the xlsx changes what the coach coaches toward — there is no finish time or target pace hardcoded in `src/config.py`.
+
+**Free-text rules blocks are parsed too.** Any single-column block below a sheet's table — a title row followed by bullet lines, e.g. `PLANTAR FASCIITIS RULES` or `LONG RUN PACING RULE` — is collected and passed to the model as plan rules that override its generic marathon-coaching instincts. Blocks with no body lines (section labels like `FUELLING STRATEGY`) are skipped.
 
 Update `TRAINING_PLAN_PATH` in `src/config.py` if your filename differs.
 

@@ -74,6 +74,100 @@ def resolve_runner_today(db: Database, within_days: int = 14) -> tuple[date, str
     return today, f"{RUNNER_TIMEZONE} (from RUNNER_TIMEZONE env var)"
 
 
+def format_training_status(ts: dict | None) -> str:
+    """One-line training-status summary, omitting fields Garmin didn't supply.
+
+    Only includes what's actually present. The previous inline version used
+    `ts.get(k, 'N/A')`, whose default never fires when the key exists holding
+    None — so a missing recovery time rendered as the literal "Recovery: Noneh".
+    Recovery time in particular has no source in any Garmin payload we fetch, so
+    it is normally absent rather than an error.
+    """
+    if not ts:
+        return "Not available"
+    parts: list[str] = []
+    if ts.get("training_load_7d") is not None:
+        parts.append(f"7-day load: {ts['training_load_7d']:g}")
+    if ts.get("recovery_time_hours") is not None:
+        parts.append(f"Recovery: {ts['recovery_time_hours']}h")
+    if ts.get("vo2max") is not None:
+        parts.append(f"VO2max: {ts['vo2max']:g}")
+    if ts.get("training_status_label"):
+        parts.append(f"Status: {ts['training_status_label']}")
+    return " | ".join(parts) if parts else "Not available"
+
+
+def format_lactate_threshold(ts: dict | None, today: date | None = None) -> str:
+    """LT block for the system prompt, with a staleness warning.
+
+    Garmin only re-estimates LT during a hard sustained effort, so on a plan
+    with no speedwork the figure can be months old and describe a different
+    athlete. Presenting that as current would be worse than omitting it, so the
+    age is always stated once it's beyond a couple of months.
+    """
+    if not ts or not (ts.get("lt_pace_min_km") or ts.get("lt_hr")):
+        return ""
+    lt_pace = ts.get("lt_pace_min_km")
+    pace_str = (
+        f"{int(lt_pace)}:{int(round((lt_pace - int(lt_pace)) * 60)):02d}/km"
+        if lt_pace else "N/A"
+    )
+    line = f"\nLACTATE THRESHOLD (Garmin estimate): pace {pace_str}, HR {ts.get('lt_hr')} bpm"
+    lt_date = ts.get("lt_date")
+    if lt_date:
+        line += f", measured {lt_date}"
+        if today:
+            try:
+                age_days = (today - date.fromisoformat(str(lt_date)[:10])).days
+            except ValueError:
+                age_days = None
+            if age_days is not None and age_days > 60:
+                line += (
+                    f" — ⚠️ {age_days} days old, predates the current training block; "
+                    f"treat as a stale reference, not today's fitness"
+                )
+    return line + "\n"
+
+
+def resolve_z2_bounds(db: Database, plan: TrainingPlan) -> tuple[int, int, str] | None:
+    """Return (low_bpm, high_bpm, provenance) for Zone 2, best source first.
+
+    1. Garmin's configured zones: zone2Floor..zone3Floor-1. Authoritative,
+       because Garmin's per-activity zone buckets — which
+       compute_zone_distribution prefers over any band we compute — are derived
+       from exactly these numbers. Quoting anything else contradicts the
+       time-in-zone percentages we report alongside it.
+    2. The Pace Guide's stated percentages applied to MAX_HR (220−age). Last
+       resort: 220−age read 190 where Garmin has 199, which put the band 5 bpm
+       low and is what made correctly-easy runs look too hard.
+
+    The provenance string goes into the prompt so a stale or missing fetch is
+    visible rather than silently changing the coaching.
+    """
+    zones = db.get_latest_hr_zones()
+    if zones and zones.get("zone2_floor") and zones.get("zone3_floor"):
+        low = int(zones["zone2_floor"])
+        high = int(zones["zone3_floor"]) - 1
+        method = zones.get("training_method") or "unknown method"
+        max_hr = zones.get("max_hr")
+        rhr = zones.get("resting_hr")
+        return low, high, (
+            f"Garmin-configured zones ({method}, max HR {max_hr}, RHR {rhr}, "
+            f"snapshot {zones.get('fetched_date')})"
+        )
+
+    latest = db.get_latest_wellness()
+    rhr = latest.get("rhr") if latest else None
+    bounds = plan.get_z2_bounds(MAX_HR, rhr)
+    if not bounds:
+        return None
+    basis = f"RHR {rhr}" if rhr else "RHR unavailable"
+    return bounds[0], bounds[1], (
+        f"⚠️ fallback estimate — plan percentages on max HR {MAX_HR} (220−age), {basis}; "
+        f"Garmin's configured zones unavailable, so this band may be several bpm off"
+    )
+
+
 def format_pace(speed_mps: float) -> str:
     """Convert m/s to min:sec/km."""
     if not speed_mps or speed_mps <= 0:
@@ -682,35 +776,32 @@ class Coach:
             f"  {pz.run_type}: {pz.pace} | {pz.hr_zone} | {pz.feel}"
             for pz in self.plan.pace_zones
         )
-        benchmarks = "\n".join(
-            f"  {b.distance}: {b.target_time} ({b.target_pace}) by {b.when_to_test}"
-            for b in self.plan.benchmarks
+        benchmarks = self.plan.get_benchmarks_text()
+        phase_banner = (
+            self.plan.get_section_marker(week.week_number) if week else ""
         )
 
         # Lactate threshold from latest training-status snapshot, if any
         ts = self.db.get_latest_training_status()
-        lt_line = ""
-        if ts and (ts.get("lt_pace_min_km") or ts.get("lt_hr")):
-            lt_pace = ts.get("lt_pace_min_km")
-            lt_hr = ts.get("lt_hr")
-            lt_pace_str = f"{int(lt_pace)}:{int(round((lt_pace - int(lt_pace)) * 60)):02d}/km" if lt_pace else "N/A"
-            lt_line = f"\nLACTATE THRESHOLD (Garmin estimate): pace {lt_pace_str}, HR {lt_hr} bpm\n"
+        lt_line = format_lactate_threshold(ts, today)
 
-        latest_wellness = self.db.get_latest_wellness()
-        rhr = latest_wellness.get("rhr") if latest_wellness else None
-        z2_bounds = self.plan.get_z2_bounds(MAX_HR, rhr)
-        if z2_bounds:
-            method = f"Karvonen / %HRR with max HR {MAX_HR} (220−age) and RHR {rhr}" if rhr else f"%MaxHR with max HR {MAX_HR} (220−age) — RHR unavailable"
-            z2_line = f"Z2 bounds ({method}, ±10 bpm typical error): {z2_bounds[0]}–{z2_bounds[1]} bpm"
+        resolved = resolve_z2_bounds(self.db, self.plan)
+        if resolved:
+            low, high, provenance = resolved
+            z2_line = f"Z2 bounds: {low}–{high} bpm [{provenance}]"
+            z2_ceiling = f"{high} bpm"
         else:
             z2_line = ""
+            z2_ceiling = "higher than the plan text assumes"
 
         total_plan_weeks = len(self.plan.weeks)
-        return f"""You are a knowledgeable and encouraging running coach for a runner training for the Lisbon Marathon on October 10, 2026, targeting a sub-4:00 finish (3:57:57).
+        guidance = self.plan.get_guidance_text()
+        return f"""You are a knowledgeable and encouraging running coach for a runner racing the Lisbon Marathon on Saturday October 10, 2026 — {self.plan.get_goal_summary()}.
 
-TRAINING PLAN:
-- {total_plan_weeks}-week plan (v5), phases: Adaptation → Restart → Base Building → Specific Prep → Taper.
-- Runs, rest days, and strength sessions vary by week — always check the prescribed cell for the day rather than assuming a fixed weekly pattern.
+TRAINING PLAN — {self.plan.title}:
+- {total_plan_weeks} weeks total. Current phase: {phase_banner or week_info}
+- Plan revision note (why the plan looks the way it does): {self.plan.revision_note}
+- Runs, rest days, strength and foot-loading sessions vary by week — always check the prescribed cell for the day rather than assuming a fixed weekly pattern.
 - Runner timezone: {tz_label} (today is {today.isoformat()} in the runner's local time — use this, not your assumed location, for season/weather context)
 - Current training week: {week_info}
 
@@ -718,8 +809,26 @@ PACE ZONES:
 {pace_zones}
 {z2_line}{lt_line}
 
-BENCHMARKS (target by August):
+PROGRESS CHECKS:
 {benchmarks}
+
+PLAN RULES — these are the runner's own written rules. They override any general
+marathon-coaching instinct you have. In particular: only the run types listed in
+PACE ZONES are on the plan, so never suggest adding a workout type the plan
+doesn't contain (e.g. hills, intervals or tempo work if they aren't listed) — if
+a session type is absent it was deliberately removed, and the revision note
+usually says why.
+
+EFFORT GOVERNS PACE. Where a plan pace band and the runner's MEASURED heart-rate
+response disagree, the measured response wins. Background you need: an earlier
+revision of this plan slowed the easy paces on the reasoning that the runner's
+easy runs were running too hot — but that reasoning used max HR 190-191 (the
+220−age estimate) when Garmin has 199 configured, so it placed the top of Zone 2
+around 149 when the real ceiling is {z2_ceiling}. Runs judged too fast under the old
+band were often correctly easy. So: do not tell this runner to slow down on pace
+alone, and do not treat a pace faster than the band as non-compliance when the
+zone data shows the effort was easy.
+{guidance}
 
 COACHING STYLE:
 - Be encouraging but honest
@@ -741,27 +850,25 @@ COACHING STYLE:
         weekday_name = run_date.strftime("%A, %B %d")
         week_info = f"Week {week.week_number}, {week.phase}" if week else "unknown week"
 
+        # Show the raw cell AND the parsed prescription. The cell is authoritative
+        # prose, but spelling out the pace band (and any closing MP segment)
+        # separately stops the model re-reading a range like "7:00–7:30/km" as a
+        # single number, and makes the two-part long runs explicit.
         prescribed_text = (
-            prescribed.description.replace("\n", " ")
+            f"{prescribed.description.replace(chr(10), ' ')}\n"
+            f"  → parsed: {prescribed.workout_type}, {prescribed.distance_km:g} km, "
+            f"pace {prescribed.pace_brief()}"
             if prescribed
             else "No run prescribed (rest day or unscheduled run)"
         )
 
         # Training status context
         ts = self.db.get_latest_training_status()
-        training_status_text = "Not available"
-        if ts:
-            training_status_text = (
-                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
-                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
-                f"VO2max: {ts.get('vo2max', 'N/A')} | "
-                f"Status: {ts.get('training_status_label', 'N/A')}"
-            )
+        training_status_text = format_training_status(ts)
 
         # Recovery & readiness from latest wellness row
         latest_wellness = self.db.get_latest_wellness()
         recovery_text = format_recovery(latest_wellness, run_date)
-        rhr_for_zones = latest_wellness.get("rhr") if latest_wellness else None
 
         # Run-quality metrics
         drift = compute_hr_drift(activity.get("splits_json", ""))
@@ -775,21 +882,22 @@ COACHING STYLE:
         else:
             drift_text = "Run too short to compute meaningfully"
 
-        z2_bounds = self.plan.get_z2_bounds(MAX_HR, rhr_for_zones)
+        resolved_z2 = resolve_z2_bounds(self.db, self.plan)
         zone_dist_text = "N/A"
-        if z2_bounds:
+        if resolved_z2:
+            z2_low, z2_high, z2_provenance = resolved_z2
             dist = compute_zone_distribution(
                 activity.get("hr_zones_json"),
                 activity.get("splits_json", ""),
-                z2_bounds[0],
-                z2_bounds[1],
+                z2_low,
+                z2_high,
             )
             if dist is not None:
                 zone_dist_text = (
                     f"Easy (Z1+Z2) {dist['easy_pct']}% (target ≥80% on easy runs) — "
                     f"breakdown: Z1 {dist['z1_pct']}% | Z2 {dist['z2_pct']}% | "
                     f"Z3+ {dist['z3plus_pct']}% "
-                    f"[Z2 band = {z2_bounds[0]}-{z2_bounds[1]} bpm via %HRR]"
+                    f"[Z2 band = {z2_low}-{z2_high} bpm; {z2_provenance}]"
                 )
 
         # Load context
@@ -910,6 +1018,9 @@ SPLITS:
 PRESCRIBED FOR TODAY ({week_info}):
 {prescribed_text}
 
+NEXT SCHEDULED RUNS (use these exact prescriptions for the look-ahead — don't infer them):
+{format_upcoming_runs(self.plan, run_date + timedelta(days=1), days=3)}
+
 RECENT TRAINING:
 {format_recent_activities(recent)}
 
@@ -922,13 +1033,15 @@ already logged or restate a tally that isn't actionable).
 
 🎯 **Verdict** [always] — one line (e.g. "Solid easy run, right on target").
 
-📋 **Prescribed vs Actual** [always] — compare distance and pace to what was prescribed.
+📋 **Prescribed vs Actual** [always] — compare distance to what was prescribed, and report actual vs prescribed pace as an OBSERVATION. On an easy or long run, effort governs: if the zone breakdown met its target, a pace faster or slower than the plan's band is NOT a deviation, problem, or something to correct — say the run was easy and move on. The plan's pace band is an expectation of what the HR cap produces; the HR cap is the actual prescription. Only treat pace as a fault when the zone data says the effort was wrong too.
 
-❤️ **HR & Effort** [always] — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
+❤️ **HR & Effort** [always] — use HR drift % and the zone breakdown. Easy-run target is Z1+Z2 ≥80% (Z1 recovery counts as easy, not "too slow"); only flag "ran too hard" if Z3+ is meaningfully elevated (>15% on an easy run). Judge this on TIME IN ZONE, never on average HR: a run can average inside Z2 while spending most of it in Z3+ (this runner has logged runs averaging 150-152 with only 35-50% of the time actually easy), so an average HR inside the band is not evidence the run was easy. If temp ≥25°C (or ≥20°C + ≥70% humidity), discount HR drift — same effort shows higher HR in heat, not lost fitness.
+
+⏱️ **Duration caveat** [only if extrapolating] — Z2 pace decays with distance for this runner: holding the cap costs roughly 20-30 s/km more at 8 km than at 5 km, and more again beyond 10 km. So a Z2-compliant short run does NOT license the same pace on a 15-25 km long run. If you are drawing a conclusion about longer runs from a short one, say what the drift figure implies instead of projecting the pace. Otherwise OMIT.
 
 💬 **Subjective** [only if RPE/Feel diverges] — high RPE (≥7) or "Weak"/"Very Weak" feel WITH normal HR/pace (early fatigue/illness — flag it), low RPE (≤4) on a hard prescribed session (you had more to give), or a multi-run drift toward feeling worse. If RPE/Feel simply matches the run, OMIT — don't read the logged number back.
 
-📈 **Trend** [always] — if the easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it. If there isn't enough history yet, say so in one line.
+📈 **Trend** [always] — if the easy-run trend shows HR-per-speed declining or drift% falling across runs, call out the fitness gain; if rising, flag it. If there isn't enough history yet, say so in one line. On a LONG run the signals that matter are HR drift and time in zone, not pace — a long run held in Z2 is a success at whatever pace that took.
 
 🔋 **Recovery & Load** [always] — first ALWAYS state the latest night's sleep score, HRV (with its 7-day avg), and RHR, even when nominal; if the wellness data is flagged stale, say so and discount it. Then the load read: ACR and the trailing-7d volume delta share the same rolling window, so read them as ONE signal — never present them as a contradiction. Weigh WHY ACR is high: after a layoff the 28-day chronic base is depressed, so a high ratio can be a baseline artifact at low absolute volume — distinguish that from genuine ramping (rising absolute trailing-7d km), the real injury risk during a rebuild. Flag concerns: ACR >1.5, trailing-7d volume jump >10%, adherence <70%, or poor HRV/sleep.
 
@@ -1017,14 +1130,7 @@ next line(s), with a blank line between sections — never "**Header:** text…"
 
         # Training status
         ts = self.db.get_latest_training_status()
-        ts_text = "Not available"
-        if ts:
-            ts_text = (
-                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
-                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
-                f"VO2max: {ts.get('vo2max', 'N/A')} | "
-                f"Status: {ts.get('training_status_label', 'N/A')}"
-            )
+        ts_text = format_training_status(ts)
 
         # Load + ramp context
         end_date_obj = date.fromisoformat(week_end)
@@ -1144,15 +1250,13 @@ Keep it Telegram-friendly (under 3000 chars)."""
         weekly_target_text = _format_weekly_target(target)
         upcoming = format_upcoming_runs(self.plan, today, days=3)
         ts = self.db.get_latest_training_status()
-        ts_text = "Not available"
-        if ts:
-            ts_text = (
-                f"7-day load: {ts.get('training_load_7d', 'N/A')} | "
-                f"Recovery: {ts.get('recovery_time_hours', 'N/A')}h | "
-                f"Status: {ts.get('training_status_label', 'N/A')}"
-            )
+        ts_text = format_training_status(ts)
 
-        prescribed_text = prescribed.description.replace("\n", " ")
+        prescribed_text = (
+            f"{prescribed.description.replace(chr(10), ' ')}\n"
+            f"  → parsed: {prescribed.workout_type}, {prescribed.distance_km:g} km, "
+            f"pace {prescribed.pace_brief()}"
+        )
 
         user_prompt = f"""It's early morning — runner hasn't trained yet today. Give a pre-run brief that helps them decide what to do this morning.
 
@@ -1174,7 +1278,7 @@ NEXT FEW DAYS:
 
 Provide:
 1. **Verdict** in one short line — one of: stick with plan / modify / postpone / skip.
-2. **Recommendation** if modifying — specific (e.g. "drop pace to easy 6:30/km", "swap with Saturday's easy run", "cut to 4km"). One sentence.
+2. **Recommendation** if modifying — specific, and framed as EFFORT rather than a pace instruction (e.g. "keep it under the Z2 ceiling and let the pace be whatever that is", "swap with Saturday's easy run", "cut to 4km"). Prefer the HR cap from PACE ZONES over quoting a target pace; never quote a pace the plan doesn't use. One sentence.
 3. **Why** — one short sentence citing the specific data point that drove the call (e.g. "HRV down 18% from baseline").
 
 If stale-wellness flag is present, lean toward "trust your legs this morning — recent data missing."

@@ -10,8 +10,27 @@ import openpyxl
 class PrescribedRun:
     workout_type: str       # "easy", "tempo", "intervals", "mp_tempo", "long", "rest", "race", "shakeout"
     distance_km: float
-    target_pace: str        # e.g. "6:15/km" or "5:30/km"
+    target_pace: str        # e.g. "7:00–7:30/km" — a range where the plan writes one
     description: str        # Full cell text
+    finish_km: float = 0.0  # Closing segment, e.g. "last 3 km @ MP (6:45)" -> 3.0
+    finish_pace: str = ""   # ...and "6:45/km"
+
+    def pace_brief(self) -> str:
+        """Pace prescription in one phrase, including any closing segment.
+
+        v6 writes its key long runs as "Long 22 km — last 3 km @ MP (6:45)": a
+        Z2 body with a faster finish. A caller reading only target_pace would
+        miss the MP segment, which is the point of those sessions.
+        """
+        parts = []
+        if self.target_pace:
+            parts.append(self.target_pace)
+        if self.finish_pace:
+            parts.append(
+                f"last {self.finish_km:g} km @ {self.finish_pace}"
+                if self.finish_km else f"finish @ {self.finish_pace}"
+            )
+        return ", ".join(parts) if parts else "no pace given"
 
 
 @dataclass
@@ -38,10 +57,30 @@ class FuelingItem:
 
 @dataclass
 class Benchmark:
-    distance: str
-    target_time: str
-    target_pace: str
-    when_to_test: str
+    """A progress checkpoint.
+
+    v5 framed these as time trials (Distance / Target Time / Target Pace / When
+    to Test); v6 reframes them as durability checkpoints (Checkpoint / Target /
+    Why / When). The columns line up positionally, so one shape covers both —
+    the field names follow v6, which is the live plan.
+    """
+    checkpoint: str
+    target: str
+    why: str
+    when: str
+
+
+@dataclass
+class GuidanceBlock:
+    """A free-text rules block from a sheet, e.g. "PLANTAR FASCIITIS RULES".
+
+    These sit below the tabular data as a title row followed by bullet lines.
+    v6 carries most of its coaching intent in them — why the paces dropped, the
+    long-run pacing rule, the PF gating rules, the one race-day rule — so they
+    get parsed and fed to the model rather than dropped on the floor.
+    """
+    title: str
+    lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +117,15 @@ class TrainingPlan:
         self.benchmarks: list[Benchmark] = []
         self.race_splits: list[RaceSplit] = []
         self.fueling: list[FuelingItem] = []
+        self.guidance: list[GuidanceBlock] = []
+        # Plan header metadata (the rows above the week table)
+        self.title: str = ""
+        self.goal_line: str = ""
+        self.revision_note: str = ""
+        self.target_finish: str = ""
+        self.target_pace: str = ""
+        # Phase banner rows, as (first week number under the banner, text)
+        self.section_markers: list[tuple[int, str]] = []
         self._parse(xlsx_path)
 
     def _parse(self, path: str):
@@ -87,11 +135,16 @@ class TrainingPlan:
         self.benchmarks = []
         self.race_splits = []
         self.fueling = []
-        self._parse_training_sheet(wb["Training Plan"])
+        self.guidance = []
+        self.section_markers = []
+        # Pace guide and race day are parsed BEFORE the training sheet: run
+        # cells fall back to them for prescriptions that name a run type without
+        # repeating its pace (v6 long runs, the Lisbon race cell).
         self._parse_pace_guide(wb["Pace Guide"])
         if "Benchmarks" in wb.sheetnames:
             self._parse_benchmarks(wb["Benchmarks"])
         self._parse_race_day(wb["Race Day Plan"])
+        self._parse_training_sheet(wb["Training Plan"])
         self._mtime = Path(path).stat().st_mtime
 
     def reload_if_changed(self) -> bool:
@@ -105,18 +158,45 @@ class TrainingPlan:
             return True
         return False
 
+    @staticmethod
+    def _find_header_row(ws, first_cell: str, max_scan: int | None = None) -> int | None:
+        """Row number whose column A equals `first_cell` (case-insensitive)."""
+        target = first_cell.strip().lower()
+        limit = ws.max_row if max_scan is None else min(ws.max_row, max_scan)
+        for i, row in enumerate(ws.iter_rows(min_row=1, max_row=limit, values_only=True), start=1):
+            cell = row[0] if row else None
+            if isinstance(cell, str) and cell.strip().lower() == target:
+                return i
+        return None
+
     def _parse_training_sheet(self, ws):
         plan_start_fallback = date(2026, 3, 2)
-        for row in ws.iter_rows(min_row=5, max_row=ws.max_row, values_only=False):
+        # Locate the "Week | Dates | Phase | Mon..." header rather than assuming
+        # a fixed row — v6 added a label row above it and a future revision could
+        # shift it again.
+        header_row = self._find_header_row(ws, "Week", max_scan=30) or 5
+        self._parse_plan_meta(ws, header_row)
+
+        pending_markers: list[str] = []
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row, values_only=False):
             week_val = row[0].value  # Column A
-            # v5 stores week numbers as strings ('1', '2', ...); older versions
-            # used ints. Accept either; non-numeric cells are phase headers.
+            # Week numbers arrive as strings ('1', '2', ...) or ints depending on
+            # how the sheet was authored. Accept either; any other non-empty cell
+            # is a phase banner ("PHASE 3: BASE REBUILD — ...") or an inline note
+            # ("Apr 06 – Apr 26: TIME OFF"), which we keep as week context.
             if isinstance(week_val, (int, float)):
                 week_num = int(week_val)
             elif isinstance(week_val, str) and week_val.strip().isdigit():
                 week_num = int(week_val.strip())
             else:
-                continue  # Phase header / blank row
+                if isinstance(week_val, str) and week_val.strip():
+                    pending_markers.append(week_val.strip())
+                continue
+
+            for marker in pending_markers:
+                self.section_markers.append((week_num, marker))
+            pending_markers.clear()
+
             dates_str = str(row[1].value or "")
             parsed = self._parse_date_range(dates_str, year=plan_start_fallback.year)
             if parsed:
@@ -125,10 +205,10 @@ class TrainingPlan:
                 week_start = plan_start_fallback + timedelta(weeks=week_num - 1)
                 week_end = week_start + timedelta(days=6)
 
-            # v5 layout: columns 3-9 are Mon..Sun (all 7 days listed); column
-            # 10 is the weekly km target; column 19 is notes. Run/strength/rest
-            # can fall on any day, so strict=True on every slot — anything
-            # without an explicit km figure parses as rest.
+            # Columns 3-9 are Mon..Sun (all 7 days listed); column 10 is the
+            # weekly km target; column 19 is notes. Runs, strength, PF loading
+            # and rest can fall on any day, so strict=True on every slot —
+            # anything without an explicit km figure parses as rest.
             self.weeks.append(TrainingWeek(
                 week_number=week_num,
                 dates=dates_str,
@@ -146,35 +226,75 @@ class TrainingPlan:
                 notes=str(row[19].value or ""),
             ))
 
+    def _parse_plan_meta(self, ws, header_row: int):
+        """Read the title / goal / revision rows that sit above the week table."""
+        lines = [
+            str(row[0]).strip()
+            for row in ws.iter_rows(min_row=1, max_row=max(header_row - 1, 1), values_only=True)
+            if row and row[0] and str(row[0]).strip()
+        ]
+        self.title = lines[0] if lines else ""
+        self.goal_line = lines[1] if len(lines) > 1 else ""
+        self.revision_note = " ".join(lines[2:])
+
+        # "Target: 4:45–5:00 (~6:50/km)" -> finish "4:45–5:00", pace "6:50/km"
+        # "Target Pace: 5:40/km"         -> pace only (the v5 shape)
+        m = re.search(r"Target:\s*([^|(]+?)\s*(?:\(|\||$)", self.goal_line)
+        self.target_finish = m.group(1).strip() if m else ""
+        m = re.search(r"Target(?:\s+Pace)?:[^|]*?~?\s*(\d:\d{2})\s*/km", self.goal_line)
+        self.target_pace = f"{m.group(1)}/km" if m else ""
+
+    _FINISH_RE = re.compile(
+        r"last\s+(\d+(?:\.\d+)?)\s*km\s*(?:@|at)\s*(?:MP\s*\(\s*)?(\d:\d{2})",
+        re.IGNORECASE,
+    )
+
     def _parse_run_cell(self, text: str, day: str, strict: bool = False) -> PrescribedRun:
         if not text or text == "None":
             return PrescribedRun("rest", 0, "", "Rest")
 
         text_lower = text.lower()
 
-        # Race day — the v5 plan flags races with the 🏁 emoji and/or
+        # Race day — the plan flags races with the 🏁 emoji and/or
         # "MARATHON"/"HALF" in the cell (and may omit a km figure on the
         # Lisbon cell). Detect any of those so race day doesn't fall through
         # to rest under strict mode.
         if "🏁" in text or "race day" in text_lower or "marathon" in text_lower or "half" in text_lower:
             dist = self._extract_distance(text)
+            is_half = "half" in text_lower
             if dist == 0:
                 # Default: full marathon unless the cell says "half"
-                dist = 21.1 if "half" in text_lower else 42.2
-            return PrescribedRun("race", dist, "5:40/km", text)
+                dist = 21.1 if is_half else 42.2
+            # Goal-race pace comes from the Race Day Plan's opening split so it
+            # tracks the sheet instead of a constant baked in here (which is how
+            # v5's 5:40/km outlived the sub-4:00 goal). A tune-up race is a
+            # different event — don't stamp the marathon's pace on it.
+            pace = "" if is_half else self._race_opening_pace()
+            return PrescribedRun("race", dist, pace, text)
 
         # Shakeout
         if "shakeout" in text_lower:
             dist = self._extract_distance(text)
             return PrescribedRun("shakeout", dist, "", text)
 
-        dist = self._extract_distance(text)
-        pace = self._extract_pace(text)
+        # A closing fast segment ("— last 3 km @ MP (6:45)") is a separate
+        # prescription from the run's body pace; pull it out before reading the
+        # body pace so the two don't get conflated.
+        finish_km, finish_pace = 0.0, ""
+        fm = self._FINISH_RE.search(text)
+        body_text = text
+        if fm:
+            finish_km = float(fm.group(1))
+            finish_pace = f"{fm.group(2)}/km"
+            body_text = text[: fm.start()] + text[fm.end():]
 
-        # Strict mode (Mon column): only treat as a run if a km distance is present.
-        # Cross-training/strength/rest cells (e.g. "F45 Weights", "REST or bodyweight")
-        # have no km figure and should fall through to rest so they aren't matched
-        # against actual runs.
+        dist = self._extract_distance(text)
+        pace = self._extract_pace(body_text)
+
+        # Strict mode: only treat as a run if a km distance is present.
+        # Cross-training/strength/PF-loading/rest cells (e.g. "F45 Weights",
+        # "Foot/calf loading (PF protocol ~20 min)") have no km figure and should
+        # fall through to rest so they aren't matched against actual runs.
         if strict and dist == 0:
             return PrescribedRun("rest", 0, "", text)
 
@@ -194,7 +314,41 @@ class TrainingPlan:
         else:
             wtype = "easy"
 
-        return PrescribedRun(wtype, dist, pace, text)
+        # v6 writes long runs as "Long 22 km — last 3 km @ MP (6:45)" with no
+        # body pace in the cell, because the Pace Guide owns it. Fall back to the
+        # matching pace zone so the coach still has a target to compare against.
+        if not pace:
+            pace = self._zone_pace(wtype)
+
+        return PrescribedRun(wtype, dist, pace, text, finish_km=finish_km, finish_pace=finish_pace)
+
+    _ZONE_KEYWORDS = {
+        "easy": ("easy", "recovery"),
+        "long": ("long",),
+        "mp_tempo": ("marathon pace",),
+        "tempo": ("tempo", "threshold"),
+        "intervals": ("interval",),
+    }
+
+    def _zone_pace(self, workout_type: str) -> str:
+        """Pace for a workout type, read off the Pace Guide sheet."""
+        for keyword in self._ZONE_KEYWORDS.get(workout_type, ()):
+            for pz in self.pace_zones:
+                if keyword in pz.run_type.lower():
+                    return pz.pace
+        return ""
+
+    def _race_opening_pace(self) -> str:
+        """Opening-split pace from the Race Day Plan, e.g. '7:00/km'.
+
+        v6's whole race strategy hangs on starting slow, so the opening split —
+        not marathon pace — is what the race cell should advertise.
+        """
+        for split in self.race_splits:
+            m = re.search(r"(\d:\d{2})\s*/km", split.target_pace)
+            if m:
+                return f"{m.group(1)}/km"
+        return self._zone_pace("mp_tempo")
 
     _MONTHS = {m: i + 1 for i, m in enumerate(
         ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -250,21 +404,28 @@ class TrainingPlan:
         return None
 
     def _extract_pace(self, text: str) -> str:
-        # Match ~6:30/km style
-        m = re.search(r"~?(\d:\d{2})/km", text)
+        # A range first ("7:00–7:30/km"). Matching the single-pace pattern
+        # instead silently reports only the slow end of the band, which is how
+        # "Easy 5 km @ 7:00–7:30/km" used to come back as just "7:30/km".
+        m = re.search(r"~?(\d:\d{2})\s*[–—-]\s*(\d:\d{2})\s*/km", text)
+        if m:
+            return f"{m.group(1)}–{m.group(2)}/km"
+        # Single pace, ~6:30/km style
+        m = re.search(r"~?(\d:\d{2})\s*/km", text)
         if m:
             return f"{m.group(1)}/km"
-        # Match @5:25 style (tempo/interval target pace)
-        m = re.search(r"@(\d:\d{2})", text)
+        # @5:25 style (tempo/interval target pace)
+        m = re.search(r"@\s*(\d:\d{2})", text)
         if m:
             return f"{m.group(1)}/km"
         return ""
 
     def _parse_pace_guide(self, ws):
-        # Pace zones live in a contiguous block under the header row.
-        # v5 grew this from 5 zones (E/MP/T/I/S) to 7 (adds Hill Reps, Strides);
-        # walk until the first blank row to stay robust to future tweaks.
-        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True):
+        # Pace zones live in a contiguous block under the "Run Type" header; walk
+        # until the first blank row to stay robust to zones being added or
+        # removed (v5 had 7, v6 has 4 after hills and speedwork were cut).
+        header_row = self._find_header_row(ws, "Run Type") or 3
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row, values_only=True):
             run_type = row[0] if len(row) > 0 else None
             if not run_type:
                 break
@@ -274,38 +435,83 @@ class TrainingPlan:
                 hr_zone=str(row[2] or "") if len(row) > 2 else "",
                 feel=str(row[3] or "") if len(row) > 3 else "",
             ))
+        self._parse_guidance(ws)
 
     def _parse_benchmarks(self, ws):
-        # v5 moved benchmarks to their own sheet. Header is row 3, entries
-        # start at row 4. Walk until the first blank row.
-        for row in ws.iter_rows(min_row=4, max_row=ws.max_row, values_only=True):
-            distance = row[0] if len(row) > 0 else None
-            if not distance:
+        header_row = (
+            self._find_header_row(ws, "Checkpoint")   # v6
+            or self._find_header_row(ws, "Distance")  # v5
+            or 3
+        )
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row, values_only=True):
+            checkpoint = row[0] if len(row) > 0 else None
+            if not checkpoint:
                 break
             self.benchmarks.append(Benchmark(
-                distance=str(distance),
-                target_time=str(row[1] or "") if len(row) > 1 else "",
-                target_pace=str(row[2] or "") if len(row) > 2 else "",
-                when_to_test=str(row[3] or "") if len(row) > 3 else "",
+                checkpoint=str(checkpoint),
+                target=str(row[1] or "") if len(row) > 1 else "",
+                why=str(row[2] or "") if len(row) > 2 else "",
+                when=str(row[3] or "") if len(row) > 3 else "",
             ))
 
     def _parse_race_day(self, ws):
-        # Rows 3-11: race splits
-        for row in ws.iter_rows(min_row=3, max_row=11, values_only=True):
-            if row[0]:
-                self.race_splits.append(RaceSplit(
-                    segment=str(row[0]),
-                    target_pace=str(row[1] or ""),
-                    cumulative_time=str(row[2] or ""),
-                ))
-        # Rows 15-21: fueling
-        for row in ws.iter_rows(min_row=15, max_row=21, values_only=True):
-            if row[0]:
-                self.fueling.append(FuelingItem(
-                    when=str(row[0]),
-                    what=str(row[1] or ""),
-                    notes=str(row[2] or ""),
-                ))
+        # Header-driven rather than fixed row numbers. v6 moved both tables up a
+        # row, and the old ranges (splits 3-11, fuelling 15-21) only lined up
+        # with v6 by luck — against v5 they read the "Split" header as a split,
+        # dropped the 40–42.2 km split, and took two section-title rows as
+        # fuelling entries. Anchoring on the header cell fits either layout.
+        for seg, pace, cume in self._read_table(ws, "Split", 3):
+            self.race_splits.append(RaceSplit(
+                segment=seg, target_pace=pace, cumulative_time=cume,
+            ))
+        for when, what, notes in self._read_table(ws, "When", 3):
+            self.fueling.append(FuelingItem(when=when, what=what, notes=notes))
+        self._parse_guidance(ws)
+
+    def _read_table(self, ws, header_first_cell: str, n_cols: int) -> list[tuple[str, ...]]:
+        """Rows under a header row, stopping at the first blank or single-cell row.
+
+        A row with only column A filled means we've reached the next section
+        title (e.g. "FUELLING STRATEGY"), not another data row.
+        """
+        header_row = self._find_header_row(ws, header_first_cell)
+        if header_row is None:
+            return []
+        out: list[tuple[str, ...]] = []
+        for row in ws.iter_rows(min_row=header_row + 1, max_row=ws.max_row, values_only=True):
+            cells = [row[i] if i < len(row) else None for i in range(n_cols)]
+            if not cells[0] or all(c is None for c in cells[1:]):
+                break
+            out.append(tuple(str(c or "") for c in cells))
+        return out
+
+    def _parse_guidance(self, ws):
+        """Collect free-text rules blocks (a single-cell title + bullet lines).
+
+        Skips row 1 (the sheet title) and any block with no body lines — that
+        pattern is a label for a following table, not guidance.
+        """
+        current: GuidanceBlock | None = None
+
+        def flush():
+            nonlocal current
+            if current and current.lines:
+                self.guidance.append(current)
+            current = None
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+            first = row[0] if row else None
+            rest_filled = any(c is not None for c in row[1:]) if row and len(row) > 1 else False
+            if first is None or not str(first).strip() or rest_filled:
+                # Blank row, or a tabular row — either way, end the block.
+                flush()
+                continue
+            text = str(first).strip()
+            if current is None:
+                current = GuidanceBlock(title=text)
+            else:
+                current.lines.append(text)
+        flush()
 
     def get_week_for_date(self, d: date) -> TrainingWeek | None:
         for week in self.weeks:
@@ -320,18 +526,56 @@ class TrainingPlan:
         slot = week.day(d.weekday())
         return slot if slot.workout_type != "rest" else None
 
+    def get_section_marker(self, week_number: int) -> str:
+        """The phase banner covering a week, e.g. 'PHASE 3: BASE REBUILD — ...'."""
+        current = ""
+        for start, text in self.section_markers:
+            if start <= week_number:
+                current = text
+        return current
+
+    def get_goal_summary(self) -> str:
+        """One line naming the plan's goal, straight from the xlsx.
+
+        Read off the sheet rather than hardcoded, so a revision that changes the
+        target (as v6 did, retiring sub-4:00) can't leave a stale goal embedded
+        in the coaching prompts.
+        """
+        if self.target_finish and self.target_pace:
+            return f"target {self.target_finish} (~{self.target_pace})"
+        if self.target_pace:
+            return f"target pace {self.target_pace}"
+        return self.goal_line or self.title
+
+    def get_benchmarks_text(self) -> str:
+        """Progress checkpoints, formatted for a prompt."""
+        return "\n".join(
+            f"  {b.checkpoint}: {b.target}"
+            + (f" — {b.why}" if b.why else "")
+            + (f" [{b.when}]" if b.when else "")
+            for b in self.benchmarks
+        )
+
+    def get_guidance_text(self) -> str:
+        """Every free-text rules block, formatted for a prompt."""
+        out: list[str] = []
+        for block in self.guidance:
+            out.append(f"{block.title}")
+            out.extend(f"  {line}" for line in block.lines)
+            out.append("")
+        return "\n".join(out).rstrip()
+
     _DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
     def get_plan_summary(self) -> str:
         total = len(self.weeks)
-        lines = [f"{total}-week sub-4:00 Lisbon Marathon plan (Oct 10, 2026)", ""]
+        lines = [f"{self.title or 'Training plan'} — {total} weeks, {self.get_goal_summary()}", ""]
         lines.append("PACE ZONES:")
         for pz in self.pace_zones:
             lines.append(f"  {pz.run_type}: {pz.pace} | {pz.hr_zone} | {pz.feel}")
         lines.append("")
-        lines.append("BENCHMARKS:")
-        for b in self.benchmarks:
-            lines.append(f"  {b.distance}: {b.target_time} ({b.target_pace}) by {b.when_to_test}")
+        lines.append("PROGRESS CHECKS:")
+        lines.append(self.get_benchmarks_text())
         lines.append("")
         lines.append("WEEKS:")
         for w in self.weeks:
@@ -349,6 +593,9 @@ class TrainingPlan:
 
     def get_week_summary(self, week: TrainingWeek) -> str:
         lines = [f"Week {week.week_number} ({week.phase}) — {week.dates}"]
+        marker = self.get_section_marker(week.week_number)
+        if marker:
+            lines.append(marker)
         for i, label in enumerate(self._DAY_LABELS):
             lines.append(f"{label}: {week.day(i).description}")
         lines.append(f"Target: {week.weekly_km_target} km")

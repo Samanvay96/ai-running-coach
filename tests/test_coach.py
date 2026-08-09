@@ -20,6 +20,7 @@ from src.coach import (
     _extract_text,
     _format_weekly_target,
     compute_acr,
+    compute_adherence,
     compute_cadence_context,
     compute_mileage_delta,
     compute_weekly_target,
@@ -672,3 +673,92 @@ def test_mileage_delta_uses_trailing_window_and_agrees_with_acr():
         # the fix guarantees: shared window ⇒ sign(delta) matches (ACR > 1).
         assert (delta["pct_delta"] > 0) == (acr["ratio"] > 1)
         db.close()
+
+
+# ---------------- shifted run days ----------------
+#
+# The plan pins each session to a weekday, but a Saturday long run often gets
+# done on Sunday. Before shift-tolerant resolution that run lost its
+# prescription entirely (analysed as "No run prescribed") and Saturday was
+# booked as a missed run, so adherence fell for a week that was actually
+# completed in full.
+
+
+@pytest.fixture
+def shift_env(tmp_path):
+    """Synthetic one-week plan + empty DB.
+
+    The fixture week is Mon 2026-03-02 – Sun 03-08, running Tue (easy 5 km) and
+    Sat (long 20 km). Built here rather than loaded from the real workbook so
+    these run in a fresh clone, where the plan is gitignored.
+    """
+    from test_training_plan import _write_workbook
+
+    plan = TrainingPlan(str(_write_workbook(tmp_path / "shift.xlsx", week_header_row=5)))
+    db = Database(tmp_path / "shift.db")
+    yield plan, db
+    db.close()
+
+
+def _save_run(db: Database, activity_id: int, day: str, km: float = 20.0) -> None:
+    db.save_activity(
+        activity_id=activity_id, start_time=f"{day} 08:00:00", activity_type="running",
+        distance_km=km, duration_seconds=int(km * 400), avg_pace="6:40",
+        avg_hr=145, max_hr=160, calories=int(km * 60), aerobic_te=3.0,
+        vo2max=None, raw_json="{}", splits_json="[]",
+    )
+
+
+def test_adherence_credits_a_long_run_moved_to_sunday(shift_env):
+    """Saturday's slot is completed by the Sunday run, not missed."""
+    plan, db = shift_env
+    _save_run(db, 1, "2026-03-08")  # Sunday
+    adherence = compute_adherence(plan, db, date(2026, 3, 9), lookback_runs=2)
+    assert adherence["completed"] == 1
+    assert "2026-03-07" not in adherence["missed_dates"]
+    # Tuesday genuinely wasn't run, and still shows as missed.
+    assert adherence["missed_dates"] == ["2026-03-03"]
+
+
+def test_adherence_still_flags_a_genuinely_missed_run(shift_env):
+    """Nothing run at all → both slots missed. The shift tolerance must not
+    quietly forgive skipped weeks."""
+    plan, db = shift_env
+    adherence = compute_adherence(plan, db, date(2026, 3, 9), lookback_runs=2)
+    assert adherence["completed"] == 0
+    assert adherence["missed_dates"] == ["2026-03-07", "2026-03-03"]
+
+
+def test_adherence_does_not_let_one_run_cover_two_slots(shift_env):
+    """A Sunday run credits Saturday; Tuesday stays missed even though it's the
+    only slot left. One run, one slot."""
+    plan, db = shift_env
+    _save_run(db, 1, "2026-03-08")
+    adherence = compute_adherence(plan, db, date(2026, 3, 9), lookback_runs=2)
+    assert adherence["total"] == 2
+    assert adherence["completed"] == 1
+
+
+def test_analyze_run_prompt_carries_the_prescription_of_a_moved_run(shift_env):
+    """The whole point: a Sunday long run is judged against Saturday's slot."""
+    plan, db = shift_env
+    _save_run(db, 1, "2026-03-08")
+    c = Coach(api_key="test-key", plan=plan, db=db)
+    c.client = MagicMock()
+    _wire_stream(c.client, _response([_block("text", "ok")]))
+    c.analyze_run({
+        "start_time": "2026-03-08 08:00:00",
+        "distance_km": 20.0,
+        "duration_seconds": 8000,
+        "avg_pace_min_km": "6:40",
+        "avg_hr": 145,
+        "max_hr": 160,
+        "splits_json": "[]",
+        "hr_zones_json": None,
+    })
+    prompt = c.client.messages.stream.call_args.kwargs["messages"][-1]["content"]
+    assert "No run prescribed" not in prompt
+    assert "Long 20 km" in prompt
+    assert "carried over from Saturday Mar 07" in prompt
+    # The model has to be told not to read the day mismatch as a missed session.
+    assert "not missed" in prompt

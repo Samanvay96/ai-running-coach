@@ -1,4 +1,5 @@
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -106,6 +107,34 @@ class TrainingWeek:
             self.monday, self.tuesday, self.wednesday, self.thursday,
             self.friday, self.saturday, self.sunday,
         )[weekday]
+
+    def run_slots(self) -> list[tuple[int, PrescribedRun]]:
+        """Every non-rest slot this week, as (weekday index, run)."""
+        return [(i, self.day(i)) for i in range(7) if self.day(i).workout_type != "rest"]
+
+
+@dataclass
+class ResolvedRun:
+    """A prescribed slot matched to the date a run actually happened on.
+
+    `prescribed_date` is the plan's own day for the slot; `query_date` is the
+    day being asked about. They differ when a run moved — the Saturday long run
+    done on Sunday.
+    """
+    run: PrescribedRun
+    prescribed_date: date
+    query_date: date
+
+    @property
+    def shifted(self) -> bool:
+        return self.prescribed_date != self.query_date
+
+    def shift_note(self) -> str:
+        """One phrase naming the move, or '' when the run is on its own day."""
+        if not self.shifted:
+            return ""
+        direction = "carried over from" if self.prescribed_date < self.query_date else "pulled forward from"
+        return f"{direction} {self.prescribed_date.strftime('%A %b %d')}"
 
 
 class TrainingPlan:
@@ -520,11 +549,77 @@ class TrainingPlan:
         return None
 
     def get_prescribed_run(self, d: date) -> PrescribedRun | None:
+        """The run prescribed for exactly this date, ignoring any day shift.
+
+        Prospective callers ("what am I meant to run on Thursday?") want this.
+        To match a run that already happened — or one being decided on this
+        morning — use resolve_run_for_date, which tolerates a moved day.
+        """
         week = self.get_week_for_date(d)
         if not week:
             return None
         slot = week.day(d.weekday())
         return slot if slot.workout_type != "rest" else None
+
+    # A run can only stand in for a slot within this many days. Keeps a Sunday
+    # run from claiming Thursday's easy slot once Saturday's is spoken for —
+    # at that distance it's a different session, not a moved one.
+    MAX_SHIFT_DAYS = 2
+
+    def resolve_run_for_date(
+        self,
+        d: date,
+        completed_dates: Iterable[date] | None = None,
+    ) -> ResolvedRun | None:
+        """Match a date to the plan slot it fulfils, tolerating a shifted day.
+
+        The plan lays out fixed weekdays (Tue/Thu/Sat in v7), but runs move —
+        a Saturday long run gets done on Sunday. Resolving strictly by weekday
+        drops the prescription for that run and books Saturday as a miss, so:
+
+          1. If `d` has a run of its own, that's the answer.
+          2. Otherwise take the nearest non-rest slot in the same plan week,
+             within MAX_SHIFT_DAYS, that no other run has already claimed.
+             Ties — a rest day flanked by two slots — go to the earlier one;
+             carrying a run over is far more common than pulling one forward.
+
+        `completed_dates` is every date already holding a recorded activity;
+        those slots are spoken for and can't be matched twice. Callers without
+        DB access may omit it, at the cost of possibly matching a slot that was
+        in fact already run.
+
+        Returns None outside the plan window, or when no slot is free.
+        """
+        week = self.get_week_for_date(d)
+        if not week:
+            return None
+
+        exact = week.day(d.weekday())
+        if exact.workout_type != "rest":
+            return ResolvedRun(run=exact, prescribed_date=d, query_date=d)
+
+        taken = set(completed_dates or ())
+        # Anchor on d's own Monday rather than week.start_date: day() is indexed
+        # by Python weekday, so this is the mapping that's guaranteed to agree
+        # with the exact-match branch above.
+        monday = d - timedelta(days=d.weekday())
+        candidates: list[tuple[int, bool, date, PrescribedRun]] = []
+        for i, run in week.run_slots():
+            slot_date = monday + timedelta(days=i)
+            if slot_date == d or slot_date in taken:
+                continue
+            if not (week.start_date <= slot_date <= week.end_date):
+                continue
+            gap = abs((slot_date - d).days)
+            if gap > self.MAX_SHIFT_DAYS:
+                continue
+            # Sort key: nearest first, then past before future.
+            candidates.append((gap, slot_date > d, slot_date, run))
+
+        if not candidates:
+            return None
+        _, _, slot_date, run = min(candidates, key=lambda c: (c[0], c[1]))
+        return ResolvedRun(run=run, prescribed_date=slot_date, query_date=d)
 
     def get_section_marker(self, week_number: int) -> str:
         """The phase banner covering a week, e.g. 'PHASE 3: BASE REBUILD — ...'."""

@@ -2,12 +2,13 @@
 
 The gates that matter:
   1. Only fire at runner-local TARGET_LOCAL_HOUR (06:00 by default).
-  2. Only fire on prescribed-run days.
+  2. Only fire on days that resolve to a run — the day's own prescribed slot,
+     or one carried over from a nearby day and still outstanding this week.
   3. Don't fire twice for the same runner-local date.
 """
 
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +16,7 @@ import pytest
 
 from src.db import Database
 from src.prerun import TARGET_LOCAL_HOUR, run_prerun
+from src.training_plan import PrescribedRun, ResolvedRun
 
 
 @pytest.fixture
@@ -33,13 +35,31 @@ def _patch_coach_returning(text: str):
     return patch("src.prerun.Coach", return_value=instance)
 
 
-def _patch_plan(workout_type: str):
-    """Patch TrainingPlan so get_prescribed_run returns a deterministic workout type."""
+def _patch_plan(workout_type: str, *, shifted: bool = False):
+    """Patch TrainingPlan so resolution returns a deterministic slot.
+
+    workout_type "rest" means nothing resolves for today — the gate's real input
+    is whether resolve_run_for_date found a free slot at all, not the slot's
+    type. get_week_for_date returns None so prerun skips the DB lookup for
+    already-completed dates; the resolution itself is what's under test here.
+    """
     plan_inst = MagicMock()
-    prescribed = MagicMock()
-    prescribed.workout_type = workout_type
-    prescribed.description = "easy 6km @ 6:15"
-    plan_inst.get_prescribed_run.return_value = prescribed
+    plan_inst.get_week_for_date.return_value = None
+    if workout_type == "rest":
+        plan_inst.resolve_run_for_date.return_value = None
+    else:
+        run = PrescribedRun(
+            workout_type=workout_type,
+            distance_km=6.0,
+            target_pace="6:15/km",
+            description="easy 6km @ 6:15",
+        )
+        query = date(2026, 5, 14)
+        plan_inst.resolve_run_for_date.return_value = ResolvedRun(
+            run=run,
+            prescribed_date=query - timedelta(days=1) if shifted else query,
+            query_date=query,
+        )
     return patch("src.prerun.TrainingPlan", return_value=plan_inst)
 
 
@@ -51,7 +71,7 @@ def test_gate_runner_local_hour(patched_env, tmp_path, monkeypatch):
     """Wrong runner-local hour → don't send, even if everything else passes."""
     wrong_hour = (TARGET_LOCAL_HOUR + 4) % 24
     fake_now = datetime(2026, 5, 14, wrong_hour, 30, tzinfo=timezone.utc)
-    monkeypatch.setattr("src.prerun._runner_local_now", lambda db: fake_now)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
     with _patch_db_path(tmp_path), _patch_plan("easy"), _patch_coach_returning("ok"):
         result = run_prerun()
     assert result == 0
@@ -61,7 +81,7 @@ def test_gate_runner_local_hour(patched_env, tmp_path, monkeypatch):
 def test_gate_rest_day(patched_env, tmp_path, monkeypatch):
     """Right hour but rest day → don't send."""
     fake_now = datetime(2026, 5, 14, TARGET_LOCAL_HOUR, 5, tzinfo=timezone.utc)
-    monkeypatch.setattr("src.prerun._runner_local_now", lambda db: fake_now)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
     with _patch_db_path(tmp_path), _patch_plan("rest"), _patch_coach_returning("ok"):
         result = run_prerun()
     assert result == 0
@@ -71,7 +91,7 @@ def test_gate_rest_day(patched_env, tmp_path, monkeypatch):
 def test_gate_dedup_within_same_runner_date(patched_env, tmp_path, monkeypatch):
     """Second fire on the same runner-local date → don't re-send."""
     fake_now = datetime(2026, 5, 14, TARGET_LOCAL_HOUR, 5, tzinfo=timezone.utc)
-    monkeypatch.setattr("src.prerun._runner_local_now", lambda db: fake_now)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
     with _patch_db_path(tmp_path), _patch_plan("easy"), _patch_coach_returning("brief content"):
         first = run_prerun()
         second = run_prerun()
@@ -83,7 +103,7 @@ def test_gate_dedup_within_same_runner_date(patched_env, tmp_path, monkeypatch):
 def test_happy_path_sends_brief(patched_env, tmp_path, monkeypatch):
     """All gates pass → send the brief, record it for dedup."""
     fake_now = datetime(2026, 5, 14, TARGET_LOCAL_HOUR, 5, tzinfo=timezone.utc)
-    monkeypatch.setattr("src.prerun._runner_local_now", lambda db: fake_now)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
     with _patch_db_path(tmp_path), _patch_plan("easy"), _patch_coach_returning("Stick with plan. Easy 6km looks right."):
         sent = run_prerun()
     assert sent == 1
@@ -96,10 +116,35 @@ def test_force_flag_bypasses_hour_gate(patched_env, tmp_path, monkeypatch):
     """force=True (CLI --force) ignores the hour gate so we can re-trigger manually."""
     wrong_hour = (TARGET_LOCAL_HOUR + 8) % 24
     fake_now = datetime(2026, 5, 14, wrong_hour, 30, tzinfo=timezone.utc)
-    monkeypatch.setattr("src.prerun._runner_local_now", lambda db: fake_now)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
     with _patch_db_path(tmp_path), _patch_plan("easy"), _patch_coach_returning("forced brief"):
         result = run_prerun(force=True)
     assert result == 1
+
+
+def test_carried_over_run_still_gets_a_brief(patched_env, tmp_path, monkeypatch):
+    """A rest day holding an outstanding slot resolves, so the brief still fires.
+
+    Sunday is rest on paper, but when Saturday's long run hasn't been done the
+    runner is very likely doing it today — sending nothing was the old gap.
+    """
+    fake_now = datetime(2026, 5, 14, TARGET_LOCAL_HOUR, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
+    with _patch_db_path(tmp_path), _patch_plan("long", shifted=True), \
+            _patch_coach_returning("Stick with plan."):
+        sent = run_prerun()
+    assert sent == 1
+    # The header has to say the run moved, or the brief reads as a bonus session.
+    assert "carried over from" in patched_env[0]
+
+
+def test_brief_header_omits_shift_note_on_the_prescribed_day(patched_env, tmp_path, monkeypatch):
+    fake_now = datetime(2026, 5, 14, TARGET_LOCAL_HOUR, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr("src.prerun.runner_local_now", lambda db: fake_now)
+    with _patch_db_path(tmp_path), _patch_plan("easy"), _patch_coach_returning("ok"):
+        run_prerun()
+    assert "carried over" not in patched_env[0]
+    assert "pulled forward" not in patched_env[0]
 
 
 # ---------------- prerun_sent table ----------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Morning pre-run brief — fires hourly, gates to 06:00 runner-local on prescribed-run days.
+"""Morning pre-run brief — fires hourly, gates to 06:00 runner-local on run days.
 
 Why this design: systemd's OnCalendar fires in the *Pi's* timezone, but we want
 to deliver this in the *runner's* timezone (auto-derived from their latest
@@ -10,7 +10,6 @@ firings actually sends a message on a given runner-local date.
 
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,8 +19,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
-from src.config import ANTHROPIC_API_KEY, DB_PATH, RUNNER_TZ, TRAINING_PLAN_PATH
-from src.coach import Coach, resolve_runner_today
+from src.config import ANTHROPIC_API_KEY, DB_PATH, TRAINING_PLAN_PATH
+from src.coach import Coach, completed_run_dates, resolve_runner_today, runner_local_now
 from src.db import Database
 from src.telegram_bot import send_coaching_message, send_error_alert
 from src.training_plan import TrainingPlan
@@ -31,27 +30,18 @@ from src.training_plan import TrainingPlan
 TARGET_LOCAL_HOUR = 6
 
 
-def _runner_local_now(db: Database) -> datetime:
-    """Current wall-clock time in the runner's resolved timezone."""
-    offset = db.get_latest_tz_offset_minutes(within_days=14)
-    if offset is not None:
-        tz = timezone(timedelta(minutes=offset))
-    else:
-        tz = RUNNER_TZ
-    return datetime.now(tz)
-
-
 def run_prerun(force: bool = False) -> int:
     """Send a morning brief if all gates pass. Returns 1 if sent, 0 if skipped.
 
     Gates (all must pass):
       1. Runner-local hour matches TARGET_LOCAL_HOUR (skipped when force=True).
-      2. Today is a prescribed run day (not rest, not None).
+      2. Today resolves to a run — either its own prescribed slot, or one
+         carried over from a nearby day that's still outstanding this week.
       3. No brief already sent for this runner-local date.
     """
     db = Database(DB_PATH)
     try:
-        local_now = _runner_local_now(db)
+        local_now = runner_local_now(db)
         today, _ = resolve_runner_today(db)
 
         if not force and local_now.hour != TARGET_LOCAL_HOUR:
@@ -59,8 +49,13 @@ def run_prerun(force: bool = False) -> int:
             return 0
 
         plan = TrainingPlan(str(TRAINING_PLAN_PATH))
-        prescribed = plan.get_prescribed_run(today)
-        if not prescribed or prescribed.workout_type == "rest":
+        # Resolve rather than look up by weekday: on a rest day that still has
+        # an unrun slot beside it, the brief is for the session the runner has
+        # moved onto today (Saturday's long run being done on Sunday).
+        week = plan.get_week_for_date(today)
+        completed = completed_run_dates(db, week) if week else set()
+        resolved = plan.resolve_run_for_date(today, completed)
+        if not resolved:
             log.info("Skipping: %s is a rest / cross-training day", today.isoformat())
             return 0
 
@@ -68,10 +63,15 @@ def run_prerun(force: bool = False) -> int:
             log.info("Skipping: brief already sent for %s", today.isoformat())
             return 0
 
-        log.info("Generating morning brief for %s (%s)", today.isoformat(), prescribed.workout_type)
+        log.info(
+            "Generating morning brief for %s (%s%s)",
+            today.isoformat(),
+            resolved.run.workout_type,
+            f", {resolved.shift_note()}" if resolved.shifted else "",
+        )
         coach = Coach(ANTHROPIC_API_KEY, plan, db)
         try:
-            brief = coach.morning_brief(today)
+            brief = coach.morning_brief(today, resolved)
         except Exception as e:
             log.exception("morning_brief generation failed")
             send_error_alert(f"Morning brief failed for {today.isoformat()}: {e!r}")
@@ -82,7 +82,10 @@ def run_prerun(force: bool = False) -> int:
             return 0
 
         # Tag the message so it's visually distinct from post-run analyses.
-        message = f"☀️ Morning brief — {today.strftime('%A %b %d')}\n\n{brief}"
+        header = f"☀️ Morning brief — {today.strftime('%A %b %d')}"
+        if resolved.shifted:
+            header += f" ({resolved.shift_note()})"
+        message = f"{header}\n\n{brief}"
         send_coaching_message(message)
         db.save_prerun(today.isoformat(), brief)
         log.info("Morning brief delivered for %s", today.isoformat())

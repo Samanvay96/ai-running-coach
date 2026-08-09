@@ -168,13 +168,18 @@ class CoachBot:
         if not self._is_authorized(update):
             return
         today = date.today()
-        prescribed = self.plan.get_prescribed_run(today)
+        # Resolve, so a rest day that's carrying an outstanding run from earlier
+        # in the week shows that run rather than "rest up".
+        resolved = self.coach.resolve_run(today)
         week = self.plan.get_week_for_date(today)
 
-        if prescribed:
+        if resolved:
+            label = "Today's workout"
+            if resolved.shifted:
+                label += f" ({resolved.shift_note()})"
             msg = (
                 f"**Week {week.week_number} ({week.phase})** — {today.strftime('%A, %b %d')}\n\n"
-                f"**Today's workout:**\n{prescribed.description}"
+                f"**{label}:**\n{resolved.run.description}"
             )
             if week.notes:
                 msg += f"\n\n**Notes:** {week.notes}"

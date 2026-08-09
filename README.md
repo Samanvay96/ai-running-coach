@@ -8,7 +8,9 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 - 🧠 **Analyzes each run** against your training plan — compares actual vs prescribed pace, distance, HR, splits, weather, and the RPE / Feel score you logged on the watch
 - 💬 **Sends coaching feedback** to Telegram automatically after each detected run (rendered with proper bold sections, no leaked markdown asterisks)
 - 🗣️ **Interactive chat** — ask your coach anything about your training via Telegram
-- ☀️ **Morning brief** — 06:00 runner-local on prescribed-run days, you get a stick / modify / postpone call based on overnight wellness and load before you even decide what to wear
+- ☀️ **Morning brief** — 06:00 runner-local on run days, you get a stick / modify / postpone call based on overnight wellness and load before you even decide what to wear
+- 🔀 **Tolerates a moved run day** — do Saturday's long run on Sunday and it's still judged against Saturday's prescription, credited to that slot rather than logged as a missed run, and briefed for that morning. Runs can shift up to 2 days, and one run only ever fills one slot
+- 📅 **Weekly review** — Sunday 23:00 runner-local, once the day's running is actually in, with a Monday catch-up if that poll is missed
 - 🌍 **Travel-aware** — auto-derives your current timezone from your latest activity's UTC offset, so "today" in every analysis matches what your watch shows, not the Pi's clock
 - 🚨 **Proactive overload alerts** — daily morning check for ACR creep, RHR drift, HRV suppression, sleep debt, *and a poller heartbeat* that fires if the service has stalled >4h; nudges you *before* you overdo it
 - ⚠️ **Failure alerts** — if a run analysis fails to generate or deliver, the poller surfaces the exception (with type and `stop_reason`) to Telegram so you notice in seconds, not the next time you check the journal
@@ -60,6 +62,7 @@ Garmin Connect ──(every 1h)──> Poller ──(new run?)──> LLM Analys
        (daily 02:00) ─────── Backup timer ──→ data/backups/coach-YYYYMMDD.db.gz
        (daily 08:00) ─────── Alerts timer ──→ Wellness nudge + poller heartbeat → Telegram
        (hourly, gated) ────── Prerun timer ──→ Morning brief at 06:00 runner-local → Telegram
+       (hourly, gated) ────── Poll timer ────→ Weekly review at Sun 23:00 runner-local → Telegram
 
 Telegram user ──(message / /command)──> Bot ──> LLM Chat ──> Reply
 ```

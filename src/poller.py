@@ -4,7 +4,7 @@
 import json
 import logging
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,7 +18,7 @@ from src.config import GARMIN_EMAIL, GARMIN_PASSWORD, ANTHROPIC_API_KEY, TRAININ
 from src.db import Database
 from src.garmin_client import GarminClient
 from src.training_plan import TrainingPlan
-from src.coach import Coach, format_pace
+from src.coach import Coach, format_pace, runner_local_now
 from src.telegram_bot import send_coaching_message, send_error_alert, send_backup_to_telegram
 from src.backup import run_backup
 from src.time_utils import compute_tz_offset_minutes
@@ -34,6 +34,31 @@ def _mph_to_kph(mph: float | int | None) -> float | None:
     if mph is None:
         return None
     return round(float(mph) * 1.609344, 1)
+
+
+# Runner-local hour the weekly review goes out at on Sunday.
+WEEKLY_SUMMARY_LOCAL_HOUR = 23
+
+
+def weekly_summary_window(local_now: datetime) -> tuple[date, date] | None:
+    """The (week_start, week_end) dates to summarize now, or None if not due.
+
+    Fires at WEEKLY_SUMMARY_LOCAL_HOUR on Sunday *runner-local* rather than on
+    the first poll after midnight: a long run moved onto Sunday has to be in the
+    DB before the week is reviewed, or the summary reports the week short by
+    that run — and the run then lands in no summary at all, since the next
+    window starts on Monday.
+
+    Monday is a catch-up window for the week just ended, so a poll missed at
+    23:00 (poller down, Garmin erroring) doesn't drop the week entirely. The
+    weekly_summaries dedup on week_start keeps it to one send either way.
+    """
+    d = local_now.date()
+    if d.weekday() == 6 and local_now.hour >= WEEKLY_SUMMARY_LOCAL_HOUR:
+        return d - timedelta(days=6), d
+    if d.weekday() == 0:
+        return d - timedelta(days=7), d - timedelta(days=1)
+    return None
 
 
 def extract_weather_fields(weather: dict | None) -> dict:
@@ -394,15 +419,16 @@ def poll():
     except Exception as e:
         log.warning("Failed to save daily wellness: %s", e)
 
-    # Weekly summary — trigger on Sunday
-    today = date.today()
-    if today.weekday() == 6:  # Sunday
-        week_start = (today - timedelta(days=6)).isoformat()
+    # Weekly summary — Sunday night runner-local, once the day's running is in.
+    window = weekly_summary_window(runner_local_now(db))
+    if window:
+        week_start_date, week_end_date = window
+        week_start = week_start_date.isoformat()
         if not db.weekly_summary_sent(week_start):
             try:
-                week_end = today.isoformat()
+                week_end = week_end_date.isoformat()
                 summary = coach.weekly_summary(week_start, week_end)
-                week = plan.get_week_for_date(today)
+                week = plan.get_week_for_date(week_end_date)
                 week_num = week.week_number if week else 0
                 db.save_weekly_summary(week_num, week_start, week_end, summary)
                 send_coaching_message(summary)

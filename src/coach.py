@@ -7,7 +7,7 @@ import anthropic
 from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, RUNNER_TZ
 from .db import Database
 from .time_utils import format_utc_offset
-from .training_plan import TrainingPlan
+from .training_plan import ResolvedRun, TrainingPlan, TrainingWeek
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,18 @@ def _stream_message(client, **kwargs):
     """
     with client.messages.stream(**kwargs) as stream:
         return stream.get_final_message()
+
+
+def runner_local_now(db: Database, within_days: int = 14) -> datetime:
+    """Current wall-clock time in the runner's resolved timezone.
+
+    Same priority as resolve_runner_today (latest activity's UTC offset, then
+    RUNNER_TIMEZONE, then UTC) but keeps the time of day, which the delivery
+    gates gate on.
+    """
+    offset = db.get_latest_tz_offset_minutes(within_days=within_days)
+    tz = timezone(timedelta(minutes=offset)) if offset is not None else RUNNER_TZ
+    return datetime.now(tz)
 
 
 def resolve_runner_today(db: Database, within_days: int = 14) -> tuple[date, str]:
@@ -402,26 +414,65 @@ def compute_mileage_delta(db: Database, today: date) -> dict:
     }
 
 
+def completed_run_dates(db: Database, week: TrainingWeek) -> set[date]:
+    """Dates inside `week` that already hold a recorded activity."""
+    acts = db.get_activities_for_range(
+        week.start_date.isoformat(),
+        (week.end_date + timedelta(days=1)).isoformat(),
+    )
+    out: set[date] = set()
+    for a in acts:
+        st = a.get("start_time") or ""
+        try:
+            out.add(date.fromisoformat(st[:10]))
+        except ValueError:
+            continue
+    return out
+
+
+def fulfilled_slots(plan: TrainingPlan, db: Database, week: TrainingWeek) -> set[date]:
+    """Prescribed-slot dates in `week` that some run actually satisfied.
+
+    Each recorded activity is resolved through the plan's shift-tolerant
+    matcher, so a Saturday long run done on Sunday marks *Saturday* fulfilled.
+    Runs are resolved oldest-first and each claims at most one slot.
+    """
+    completed = completed_run_dates(db, week)
+    out: set[date] = set()
+    for d in sorted(completed):
+        resolved = plan.resolve_run_for_date(d, completed - {d})
+        if resolved:
+            out.add(resolved.prescribed_date)
+    return out
+
+
 def compute_adherence(plan: TrainingPlan, db: Database, today: date, lookback_runs: int = 10) -> dict:
     """How many of the last `lookback_runs` prescribed runs did the runner actually complete?
 
     Walks backwards from yesterday over plan-prescribed run days (Tue/Thu/Sat),
-    skipping rest/cross-training days. For each prescribed run date, looks for an
-    activity in the DB that day. Returns counts and missed dates.
+    skipping rest/cross-training days. A slot counts as completed when there's
+    an activity on its own date, or when a run on a nearby rest day in the same
+    plan week resolved to it — moving Saturday's long run to Sunday is a shifted
+    run, not a missed one. Returns counts and missed dates.
     """
     completed = 0
     missed_dates: list[str] = []
     seen = 0
     cursor = today - timedelta(days=1)
     safety_limit = lookback_runs * 7  # avoid infinite walk if plan is empty
+    fulfilled_by_week: dict[int, set[date]] = {}
     while seen < lookback_runs and safety_limit > 0:
         prescribed = plan.get_prescribed_run(cursor)
         if prescribed and prescribed.workout_type != "rest":
             seen += 1
-            day_start = cursor.isoformat()
-            day_end = (cursor + timedelta(days=1)).isoformat()
-            acts = db.get_activities_for_range(day_start, day_end)
-            if acts:
+            week = plan.get_week_for_date(cursor)
+            if week is None:
+                fulfilled: set[date] = set()
+            else:
+                if week.week_number not in fulfilled_by_week:
+                    fulfilled_by_week[week.week_number] = fulfilled_slots(plan, db, week)
+                fulfilled = fulfilled_by_week[week.week_number]
+            if cursor in fulfilled:
                 completed += 1
             else:
                 missed_dates.append(cursor.isoformat())
@@ -839,11 +890,22 @@ COACHING STYLE:
 - Suggest adjustments only when data warrants it
 - Use markdown formatting sparingly (bold for emphasis only)"""
 
+    def resolve_run(self, d: date) -> ResolvedRun | None:
+        """The plan slot a run on `d` fulfils, tolerating a shifted day.
+
+        Wraps the plan's matcher with the DB knowledge it needs: which dates in
+        the week already hold a run, so one slot can't be claimed twice.
+        """
+        week = self.plan.get_week_for_date(d)
+        completed = completed_run_dates(self.db, week) if week else set()
+        return self.plan.resolve_run_for_date(d, completed)
+
     def analyze_run(self, activity: dict) -> str:
         """Analyze a completed run against the training plan."""
         start_time = activity.get("start_time", "")
         run_date = date.fromisoformat(start_time[:10]) if start_time else date.today()
-        prescribed = self.plan.get_prescribed_run(run_date)
+        resolved = self.resolve_run(run_date)
+        prescribed = resolved.run if resolved else None
         week = self.plan.get_week_for_date(run_date)
         recent = self.db.get_recent_activities(limit=5)
 
@@ -854,13 +916,22 @@ COACHING STYLE:
         # prose, but spelling out the pace band (and any closing MP segment)
         # separately stops the model re-reading a range like "7:00–7:30/km" as a
         # single number, and makes the two-part long runs explicit.
-        prescribed_text = (
-            f"{prescribed.description.replace(chr(10), ' ')}\n"
-            f"  → parsed: {prescribed.workout_type}, {prescribed.distance_km:g} km, "
-            f"pace {prescribed.pace_brief()}"
-            if prescribed
-            else "No run prescribed (rest day or unscheduled run)"
-        )
+        if prescribed is None:
+            prescribed_text = "No run prescribed (rest day or unscheduled run)"
+        else:
+            prescribed_text = (
+                f"{prescribed.description.replace(chr(10), ' ')}\n"
+                f"  → parsed: {prescribed.workout_type}, {prescribed.distance_km:g} km, "
+                f"pace {prescribed.pace_brief()}"
+            )
+            if resolved.shifted:
+                # Say this explicitly or the model reads the day mismatch as an
+                # unplanned extra run and calls the real slot missed.
+                prescribed_text += (
+                    f"\n  → this slot was {resolved.shift_note()}; the runner moved the "
+                    f"session, so judge it as that workout and treat the prescribed day "
+                    f"as run, not missed"
+                )
 
         # Training status context
         ts = self.db.get_latest_training_status()
@@ -1224,7 +1295,7 @@ Keep it Telegram-friendly (under 3000 chars)."""
         )
         return _extract_text(response)
 
-    def morning_brief(self, today: date) -> str:
+    def morning_brief(self, today: date, resolved: ResolvedRun | None = None) -> str:
         """Generate a short pre-run advisory: stick with the plan, modify, or postpone.
 
         Pulls the same context analyze_run uses — wellness (with staleness flag),
@@ -1232,10 +1303,13 @@ Keep it Telegram-friendly (under 3000 chars)."""
         model for a one-line verdict + specific modification if warranted.
         Designed to fire at 06:00 runner-local, hours before the prescribed run.
         """
-        prescribed = self.plan.get_prescribed_run(today)
-        if not prescribed or prescribed.workout_type == "rest":
-            # The caller (prerun.py) gates on this too, but defend in depth.
+        if resolved is None:
+            # The caller (prerun.py) resolves and gates on this too, but the
+            # method has to stand on its own.
+            resolved = self.resolve_run(today)
+        if not resolved:
             return ""
+        prescribed = resolved.run
 
         weekday_name = today.strftime("%A, %B %d")
         wellness = self.db.get_latest_wellness()
@@ -1257,6 +1331,11 @@ Keep it Telegram-friendly (under 3000 chars)."""
             f"  → parsed: {prescribed.workout_type}, {prescribed.distance_km:g} km, "
             f"pace {prescribed.pace_brief()}"
         )
+        if resolved.shifted:
+            prescribed_text += (
+                f"\n  → not today's slot on paper: {resolved.shift_note()}, and still "
+                f"outstanding this week"
+            )
 
         user_prompt = f"""It's early morning — runner hasn't trained yet today. Give a pre-run brief that helps them decide what to do this morning.
 

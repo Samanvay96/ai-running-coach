@@ -763,3 +763,85 @@ def test_v7_revision_note_records_the_recalibration(v7):
     assert v7.revision_note.startswith("v7 (Jul 30)")
     assert "199" in v7.revision_note
     assert v7.title.endswith("(v7)")
+
+
+# --- Shift-tolerant slot resolution ---
+#
+# The plan pins each session to a weekday (Tue/Thu/Sat in v7), but runs move: a
+# Saturday long run gets done on Sunday. Matching strictly by weekday threw the
+# prescription away for that run and booked Saturday as a miss, so
+# resolve_run_for_date matches a run to the nearest free slot in its plan week.
+# The synthetic fixture week is Mon 2026-03-02 – Sun 03-08, running Tue + Sat.
+
+
+@pytest.fixture
+def shift_plan(tmp_path) -> TrainingPlan:
+    path = _write_workbook(tmp_path / "shift.xlsx", week_header_row=5)
+    return TrainingPlan(str(path))
+
+
+def test_resolve_returns_the_days_own_slot_unshifted(shift_plan):
+    r = shift_plan.resolve_run_for_date(date(2026, 3, 7))  # Saturday
+    assert r is not None
+    assert r.run.workout_type == "long"
+    assert r.prescribed_date == date(2026, 3, 7)
+    assert r.shifted is False
+    assert r.shift_note() == ""
+
+
+def test_sunday_run_resolves_to_saturdays_long_run(shift_plan):
+    """The case this exists for: Saturday's long run done on Sunday."""
+    r = shift_plan.resolve_run_for_date(date(2026, 3, 8))
+    assert r is not None
+    assert r.run.workout_type == "long"
+    assert r.run.distance_km == 20.0
+    assert r.prescribed_date == date(2026, 3, 7)
+    assert r.shifted is True
+    assert r.shift_note() == "carried over from Saturday Mar 07"
+
+
+def test_sunday_run_does_not_claim_a_slot_saturday_already_filled(shift_plan):
+    """Ran Saturday AND Sunday → Sunday is a genuine extra, not the long run."""
+    r = shift_plan.resolve_run_for_date(
+        date(2026, 3, 8), completed_dates={date(2026, 3, 7)}
+    )
+    assert r is None
+
+
+def test_friday_run_pulls_saturdays_long_run_forward(shift_plan):
+    r = shift_plan.resolve_run_for_date(date(2026, 3, 6))
+    assert r is not None
+    assert r.run.workout_type == "long"
+    assert r.prescribed_date == date(2026, 3, 7)
+    assert r.shift_note() == "pulled forward from Saturday Mar 07"
+
+
+def test_tie_between_flanking_slots_goes_to_the_earlier_one(shift_plan):
+    """Wednesday sits one day from Tuesday's slot and (in this fixture) nothing
+    else within reach — carrying over beats pulling forward on ties."""
+    r = shift_plan.resolve_run_for_date(date(2026, 3, 4))
+    assert r is not None
+    assert r.prescribed_date == date(2026, 3, 3)
+    assert r.run.workout_type == "easy"
+
+
+def test_resolution_will_not_reach_further_than_max_shift_days(shift_plan):
+    """Monday is 4 days from Saturday's slot — too far to be the same session."""
+    assert shift_plan.MAX_SHIFT_DAYS == 2
+    r = shift_plan.resolve_run_for_date(
+        date(2026, 3, 2), completed_dates={date(2026, 3, 3)}
+    )
+    assert r is None
+
+
+def test_resolution_stays_inside_the_plan_window(shift_plan):
+    """A date the plan doesn't cover has no slot to borrow."""
+    assert shift_plan.resolve_run_for_date(date(2026, 3, 1)) is None
+    assert shift_plan.resolve_run_for_date(date(2026, 3, 9)) is None
+
+
+def test_get_prescribed_run_stays_strict(shift_plan):
+    """Prospective callers must keep seeing Sunday as a rest day — otherwise
+    "what's coming up" smears every run across its neighbouring days."""
+    assert shift_plan.get_prescribed_run(date(2026, 3, 8)) is None
+    assert shift_plan.get_prescribed_run(date(2026, 3, 7)).workout_type == "long"

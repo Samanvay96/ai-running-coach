@@ -504,6 +504,66 @@ def _write_workbook(path, *, week_header_row: int, benchmarks: bool = True):
     return path
 
 
+def _write_two_week_workbook(path, *, week_header_row: int = 5):
+    """Like `_write_workbook`, but with two consecutive weeks (Tue + Sat runs
+    each), so cross-week-boundary shifts — a Saturday long run done the
+    following Monday — can be tested."""
+    wb = openpyxl.Workbook()
+
+    tp = wb.active
+    tp.title = "Training Plan"
+    tp.cell(row=1, column=1, value="TEST PLAN (v9)")
+    tp.cell(row=2, column=1, value="Race: Oct 10, 2026  |  Target: 4:30 (~6:24/km)  |  2 weeks")
+    tp.cell(row=3, column=1, value="v9 (Aug 01): test fixture.")
+    headers = ["Week", "Dates", "Phase", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+               "Weekly km"] + [""] * 8 + ["Notes"]
+    for col, name in enumerate(headers, start=1):
+        tp.cell(row=week_header_row, column=col, value=name or None)
+    r = week_header_row + 1
+    tp.cell(row=r, column=1, value="PHASE 1: TESTING (Weeks 1–2)")
+    tp.cell(row=r + 1, column=1, value=1)
+    tp.cell(row=r + 1, column=2, value="Mar 02 – Mar 08")
+    tp.cell(row=r + 1, column=3, value="Test")
+    tp.cell(row=r + 1, column=5, value="Easy 5 km @ 7:00–7:30/km")
+    tp.cell(row=r + 1, column=9, value="Long 20 km @ 7:00–7:20/km")
+    tp.cell(row=r + 1, column=11, value=25)
+    tp.cell(row=r + 2, column=1, value=2)
+    tp.cell(row=r + 2, column=2, value="Mar 09 – Mar 15")
+    tp.cell(row=r + 2, column=3, value="Test")
+    tp.cell(row=r + 2, column=5, value="Easy 5 km @ 7:00–7:30/km")
+    tp.cell(row=r + 2, column=9, value="Long 22 km @ 7:00–7:20/km")
+    tp.cell(row=r + 2, column=11, value=27)
+
+    pg = wb.create_sheet("Pace Guide")
+    pg.cell(row=1, column=1, value="PACE REFERENCE")
+    for col, name in enumerate(["Run Type", "Pace/km", "Heart Rate Zone", "Feel"], start=1):
+        pg.cell(row=3, column=col, value=name)
+    for i, (rt, pace) in enumerate([("Easy / Recovery", "7:00–7:30/km"),
+                                    ("Long Run", "7:00–7:20/km"),
+                                    ("Marathon Pace (MP)", "6:45/km")]):
+        pg.cell(row=4 + i, column=1, value=rt)
+        pg.cell(row=4 + i, column=2, value=pace)
+        pg.cell(row=4 + i, column=3, value="Zone 2 (60-70% max HR)")
+        pg.cell(row=4 + i, column=4, value="Conversational.")
+
+    rd = wb.create_sheet("Race Day Plan")
+    rd.cell(row=1, column=1, value="RACE DAY PLAN")
+    for col, name in enumerate(["Split", "Target Pace", "Cumulative Time"], start=1):
+        rd.cell(row=2, column=col, value=name)
+    rd.cell(row=3, column=1, value="0–5 km")
+    rd.cell(row=3, column=2, value="6:30/km (steady)")
+    rd.cell(row=3, column=3, value="0:32:30")
+    rd.cell(row=5, column=1, value="FUELLING STRATEGY")
+    for col, name in enumerate(["When", "What", "Notes"], start=1):
+        rd.cell(row=6, column=col, value=name)
+    rd.cell(row=7, column=1, value="Km 8")
+    rd.cell(row=7, column=2, value="Gel #1")
+    rd.cell(row=7, column=3, value="With water.")
+
+    wb.save(path)
+    return path
+
+
 @pytest.mark.parametrize("header_row", [5, 4, 8])
 def test_week_table_is_found_wherever_its_header_sits(tmp_path, header_row):
     """v6 added a label row above the week header; a fixed min_row=5 would break
@@ -838,6 +898,24 @@ def test_resolution_stays_inside_the_plan_window(shift_plan):
     """A date the plan doesn't cover has no slot to borrow."""
     assert shift_plan.resolve_run_for_date(date(2026, 3, 1)) is None
     assert shift_plan.resolve_run_for_date(date(2026, 3, 9)) is None
+
+
+def test_monday_run_resolves_to_prior_weeks_saturday_long_run(tmp_path):
+    """A shift can cross the week boundary: Saturday's long run done the
+    following Monday is still a 2-day carry-over, not a miss for one plan
+    week and an unprescribed extra for the next.
+
+    Week 2's own Tuesday slot (one day out, closer than Saturday's two) is
+    marked already-fulfilled, the way it would be if it held its own real
+    run — otherwise the nearer slot wins the tie-break, same as any other
+    "nearest first" resolution."""
+    plan = TrainingPlan(str(_write_two_week_workbook(tmp_path / "two_week.xlsx")))
+    r = plan.resolve_run_for_date(date(2026, 3, 9), completed_dates={date(2026, 3, 10)})
+    assert r is not None
+    assert r.run.workout_type == "long"
+    assert r.run.distance_km == 20.0  # week 1's long run, not week 2's
+    assert r.prescribed_date == date(2026, 3, 7)  # Saturday, week 1
+    assert r.shift_note() == "carried over from Saturday Mar 07"
 
 
 def test_get_prescribed_run_stays_strict(shift_plan):

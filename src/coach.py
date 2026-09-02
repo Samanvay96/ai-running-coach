@@ -434,14 +434,29 @@ def fulfilled_slots(plan: TrainingPlan, db: Database, week: TrainingWeek) -> set
     """Prescribed-slot dates in `week` that some run actually satisfied.
 
     Each recorded activity is resolved through the plan's shift-tolerant
-    matcher, so a Saturday long run done on Sunday marks *Saturday* fulfilled.
-    Runs are resolved oldest-first and each claims at most one slot.
+    matcher, so a Saturday long run done on Sunday marks *Saturday* fulfilled
+    — and so does one done the following Monday, since a shift can cross into
+    the next plan week. The activity search is padded by MAX_SHIFT_DAYS on
+    each side of `week` to catch those, but only resolutions that land back
+    inside `week` are returned — an activity padded in from a neighbouring
+    week that resolves to its own slot there is left for that week to claim.
     """
-    completed = completed_run_dates(db, week)
+    pad = timedelta(days=TrainingPlan.MAX_SHIFT_DAYS)
+    acts = db.get_activities_for_range(
+        (week.start_date - pad).isoformat(),
+        (week.end_date + pad + timedelta(days=1)).isoformat(),
+    )
+    completed: set[date] = set()
+    for a in acts:
+        st = a.get("start_time") or ""
+        try:
+            completed.add(date.fromisoformat(st[:10]))
+        except ValueError:
+            continue
     out: set[date] = set()
     for d in sorted(completed):
         resolved = plan.resolve_run_for_date(d, completed - {d})
-        if resolved:
+        if resolved and week.start_date <= resolved.prescribed_date <= week.end_date:
             out.add(resolved.prescribed_date)
     return out
 

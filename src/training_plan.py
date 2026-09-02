@@ -129,11 +129,20 @@ class ResolvedRun:
     def shifted(self) -> bool:
         return self.prescribed_date != self.query_date
 
+    @property
+    def pulled_forward(self) -> bool:
+        """True when a future slot was moved early onto `query_date`.
+
+        As opposed to a carry-over, where `query_date` is catching up on a
+        slot the runner already owes from an earlier day.
+        """
+        return self.prescribed_date > self.query_date
+
     def shift_note(self) -> str:
         """One phrase naming the move, or '' when the run is on its own day."""
         if not self.shifted:
             return ""
-        direction = "carried over from" if self.prescribed_date < self.query_date else "pulled forward from"
+        direction = "pulled forward from" if self.pulled_forward else "carried over from"
         return f"{direction} {self.prescribed_date.strftime('%A %b %d')}"
 
 
@@ -578,10 +587,13 @@ class TrainingPlan:
         drops the prescription for that run and books Saturday as a miss, so:
 
           1. If `d` has a run of its own, that's the answer.
-          2. Otherwise take the nearest non-rest slot in the same plan week,
-             within MAX_SHIFT_DAYS, that no other run has already claimed.
-             Ties — a rest day flanked by two slots — go to the earlier one;
-             carrying a run over is far more common than pulling one forward.
+          2. Otherwise take the nearest non-rest slot within MAX_SHIFT_DAYS
+             that no other run has already claimed — checked by calendar
+             distance, not by plan week, so a Saturday long run done on the
+             following Monday (a 2-day gap that crosses the week boundary)
+             still matches. Ties — a rest day flanked by two slots — go to
+             the earlier one; carrying a run over is far more common than
+             pulling one forward.
 
         `completed_dates` is every date already holding a recorded activity;
         those slots are spoken for and can't be matched twice. Callers without
@@ -599,22 +611,19 @@ class TrainingPlan:
             return ResolvedRun(run=exact, prescribed_date=d, query_date=d)
 
         taken = set(completed_dates or ())
-        # Anchor on d's own Monday rather than week.start_date: day() is indexed
-        # by Python weekday, so this is the mapping that's guaranteed to agree
-        # with the exact-match branch above.
-        monday = d - timedelta(days=d.weekday())
         candidates: list[tuple[int, bool, date, PrescribedRun]] = []
-        for i, run in week.run_slots():
-            slot_date = monday + timedelta(days=i)
-            if slot_date == d or slot_date in taken:
-                continue
-            if not (week.start_date <= slot_date <= week.end_date):
-                continue
-            gap = abs((slot_date - d).days)
-            if gap > self.MAX_SHIFT_DAYS:
-                continue
-            # Sort key: nearest first, then past before future.
-            candidates.append((gap, slot_date > d, slot_date, run))
+        for gap in range(1, self.MAX_SHIFT_DAYS + 1):
+            for slot_date in (d - timedelta(days=gap), d + timedelta(days=gap)):
+                if slot_date in taken:
+                    continue
+                slot_week = self.get_week_for_date(slot_date)
+                if not slot_week:
+                    continue
+                run = slot_week.day(slot_date.weekday())
+                if run.workout_type == "rest":
+                    continue
+                # Sort key: nearest first, then past before future.
+                candidates.append((gap, slot_date > d, slot_date, run))
 
         if not candidates:
             return None

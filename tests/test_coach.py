@@ -739,6 +739,33 @@ def test_adherence_does_not_let_one_run_cover_two_slots(shift_env):
     assert adherence["completed"] == 1
 
 
+@pytest.fixture
+def shift_env_two_weeks(tmp_path):
+    """Two consecutive plan weeks (Tue + Sat runs each), for shifts that cross
+    the week boundary — a Saturday long run done the following Monday."""
+    from test_training_plan import _write_two_week_workbook
+
+    plan = TrainingPlan(str(_write_two_week_workbook(tmp_path / "two_week.xlsx")))
+    db = Database(tmp_path / "two_week.db")
+    yield plan, db
+    db.close()
+
+
+def test_adherence_credits_a_long_run_moved_across_the_week_boundary(shift_env_two_weeks):
+    """A Saturday long run done two days later, the following Monday, crosses
+    into the next plan week. It must still credit week 1's Saturday slot —
+    not book that week as a miss while week 2 gets an unprescribed extra."""
+    plan, db = shift_env_two_weeks
+    _save_run(db, 1, "2026-03-03")  # Tue, week 1 — its own slot
+    _save_run(db, 2, "2026-03-09", km=20.0)  # Mon, week 2 — week 1's delayed long run
+    _save_run(db, 3, "2026-03-10")  # Tue, week 2 — its own slot
+
+    adherence = compute_adherence(plan, db, date(2026, 3, 16), lookback_runs=4)
+    assert adherence["completed"] == 3
+    assert "2026-03-07" not in adherence["missed_dates"]  # week 1's Saturday, done on the 9th
+    assert adherence["missed_dates"] == ["2026-03-14"]  # week 2's Saturday genuinely missed
+
+
 def test_analyze_run_prompt_carries_the_prescription_of_a_moved_run(shift_env):
     """The whole point: a Sunday long run is judged against Saturday's slot."""
     plan, db = shift_env

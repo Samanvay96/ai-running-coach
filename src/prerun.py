@@ -37,6 +37,9 @@ def run_prerun(force: bool = False) -> int:
       1. Runner-local hour matches TARGET_LOCAL_HOUR (skipped when force=True).
       2. Today resolves to a run — either its own prescribed slot, or one
          carried over from a nearby day that's still outstanding this week.
+         A future slot pulled forward onto today doesn't count: that's a
+         same-day in-chat call the runner makes, not something to brief
+         them on before they've even said they're running.
       3. No brief already sent for this runner-local date.
     """
     db = Database(DB_PATH)
@@ -57,6 +60,13 @@ def run_prerun(force: bool = False) -> int:
         resolved = plan.resolve_run_for_date(today, completed)
         if not resolved:
             log.info("Skipping: %s is a rest / cross-training day", today.isoformat())
+            return 0
+        if resolved.pulled_forward:
+            log.info(
+                "Skipping: %s is a rest day; nearest outstanding slot is a future "
+                "pull-forward (%s), not a brief-worthy day",
+                today.isoformat(), resolved.prescribed_date.isoformat(),
+            )
             return 0
 
         if db.prerun_sent_today(today.isoformat()):

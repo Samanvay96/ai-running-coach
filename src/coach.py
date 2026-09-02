@@ -11,7 +11,7 @@ from .training_plan import ResolvedRun, TrainingPlan, TrainingWeek
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 
 
 def _extract_text(response) -> str:

@@ -334,6 +334,20 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_wellness_for_date(self, target_date: str) -> dict | None:
+        """The wellness row for `target_date`, or the most recent one before it.
+
+        Anchoring on-or-before (never after) matters for a replay done days
+        later: get_latest_wellness would hand analyze_run the reader's
+        *current* sleep/HRV/RHR instead of what was true the morning of the
+        run being analyzed.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM daily_wellness WHERE date <= ? ORDER BY date DESC LIMIT 1",
+            (target_date,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_wellness_for_range(self, start_date: str, end_date: str) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM daily_wellness WHERE date >= ? AND date <= ? ORDER BY date",

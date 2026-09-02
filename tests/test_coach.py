@@ -789,3 +789,54 @@ def test_analyze_run_prompt_carries_the_prescription_of_a_moved_run(shift_env):
     assert "carried over from Saturday Mar 07" in prompt
     # The model has to be told not to read the day mismatch as a missed session.
     assert "not missed" in prompt
+
+
+def test_db_get_wellness_for_date_falls_back_to_most_recent_prior_row(tmp_path):
+    """Exact-date match wins; missing that date falls back to the nearest row
+    before it, never one after."""
+    db = Database(tmp_path / "wellness.db")
+    db.save_daily_wellness(
+        "2026-03-05", sleep_seconds=None, sleep_score=None, hrv_last_night=None,
+        hrv_7d_avg=None, hrv_status=None, rhr=50, raw_json="{}",
+    )
+    db.save_daily_wellness(
+        "2026-03-10", sleep_seconds=None, sleep_score=None, hrv_last_night=None,
+        hrv_7d_avg=None, hrv_status=None, rhr=45, raw_json="{}",
+    )
+    assert db.get_wellness_for_date("2026-03-10")["rhr"] == 45  # exact match
+    assert db.get_wellness_for_date("2026-03-07")["rhr"] == 50  # falls back, not forward
+    assert db.get_wellness_for_date("2026-03-01") is None  # nothing before it
+    db.close()
+
+
+def test_analyze_run_uses_wellness_from_the_runs_own_date(shift_env):
+    """A replay done days later must not pull the replay day's wellness into
+    the analysis of an older run — it has to use what was true that morning.
+    """
+    plan, db = shift_env
+    db.save_daily_wellness(
+        "2026-03-07", sleep_seconds=27000, sleep_score=62, hrv_last_night=47.0,
+        hrv_7d_avg=59.0, hrv_status="BALANCED", rhr=47, raw_json="{}",
+    )
+    db.save_daily_wellness(
+        "2026-03-10", sleep_seconds=30000, sleep_score=71, hrv_last_night=63.0,
+        hrv_7d_avg=57.0, hrv_status="BALANCED", rhr=46, raw_json="{}",
+    )
+    c = Coach(api_key="test-key", plan=plan, db=db)
+    c.client = MagicMock()
+    _wire_stream(c.client, _response([_block("text", "ok")]))
+    c.analyze_run({
+        "start_time": "2026-03-07 08:00:00",
+        "distance_km": 20.0,
+        "duration_seconds": 8000,
+        "avg_pace_min_km": "6:40",
+        "avg_hr": 145,
+        "max_hr": 160,
+        "splits_json": "[]",
+        "hr_zones_json": None,
+    })
+    prompt = c.client.messages.stream.call_args.kwargs["messages"][-1]["content"]
+    assert "HRV: 47.0ms" in prompt
+    assert "RHR: 47 bpm" in prompt
+    assert "HRV: 63.0ms" not in prompt
+    assert "RHR: 46 bpm" not in prompt

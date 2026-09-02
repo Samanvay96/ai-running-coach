@@ -952,9 +952,10 @@ COACHING STYLE:
         ts = self.db.get_latest_training_status()
         training_status_text = format_training_status(ts)
 
-        # Recovery & readiness from latest wellness row
-        latest_wellness = self.db.get_latest_wellness()
-        recovery_text = format_recovery(latest_wellness, run_date)
+        # Recovery & readiness as of the run's own date — not "latest", which
+        # would pull today's wellness into the analysis of a run from days ago.
+        run_date_wellness = self.db.get_wellness_for_date(run_date.isoformat())
+        recovery_text = format_recovery(run_date_wellness, run_date)
 
         # Run-quality metrics
         drift = compute_hr_drift(activity.get("splits_json", ""))

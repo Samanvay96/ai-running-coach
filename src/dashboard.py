@@ -573,7 +573,7 @@ def _render_easy_trend(plan: TrainingPlan, recent: list[dict]) -> str:
     if not trend:
         return '<section class="card"><h2>Easy-run pace vs HR</h2><p class="empty">Not enough easy runs yet.</p></section>'
     rows = "".join(
-        f"<tr><td>{_esc(r['date'])}</td><td>{r['distance_km']:g} km</td><td>{_esc(r['pace'])}/km</td>"
+        f"<tr><td>{_esc(r['date'])}</td><td>{(r['distance_km'] or 0):.1f} km</td><td>{_esc(r['pace'])}/km</td>"
         f"<td>{r['hr'] or '&mdash;'}</td><td>{r['hr_per_speed'] or '&mdash;'}</td>"
         f"<td>{r['drift_pct'] if r['drift_pct'] is not None else '&mdash;'}%</td></tr>"
         for r in trend["runs"]

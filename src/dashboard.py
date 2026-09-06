@@ -249,32 +249,73 @@ def _nice_ticks(max_val: float, n: int = 4) -> list[float]:
     return ticks
 
 
-def _svg_sparkline(values: list[float | None], *, unit: str = "", good_high: bool = True) -> str:
-    """Minimal line sparkline for a short trend (Z1+Z2 % over recent runs)."""
-    pts = [(i, v) for i, v in enumerate(values) if v is not None]
+def _svg_zone_trend(points: list[dict]) -> str:
+    """Time-in-Z1+Z2 trend, one point per run: {date, pct, workout_type}.
+
+    A percentage has a natural, meaningful 0-100 domain and the plan states an
+    explicit 80% target — autoscaling the y-axis to just the shown points (the
+    naive sparkline approach) exaggerates noise and gives the reader no way to
+    tell whether a dip is dramatic or trivial. Fixed domain + a labeled
+    reference line fixes that. Long runs are expected to sit lower than easy
+    runs by design (Z2 pace decays with distance) — shape-coding by workout
+    type turns what otherwise reads as random noise into a legible pattern.
+    """
+    pts = [p for p in points if p["pct"] is not None]
     if len(pts) < 2:
         return '<p class="empty">Not enough data yet.</p>'
-    w, h, pad = 320, 64, 6
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    lo, hi = min(ys), max(ys)
-    span = (hi - lo) or 1
+    w, h = 720, 170
+    pad_l, pad_r, pad_t, pad_b = 30, 12, 14, 24
+    plot_w, plot_h = w - pad_l - pad_r, h - pad_t - pad_b
+    n = len(pts)
 
     def sx(i):
-        return pad + (w - 2 * pad) * (i - xs[0]) / max(xs[-1] - xs[0], 1)
+        return pad_l + (plot_w * i / (n - 1) if n > 1 else 0)
 
-    def sy(v):
-        return h - pad - (h - 2 * pad) * (v - lo) / span
+    def sy(pct):
+        return pad_t + plot_h * (1 - pct / 100)
 
-    path = " ".join(f"{'M' if i == 0 else 'L'}{sx(x):.1f},{sy(v):.1f}" for i, (x, v) in enumerate(pts))
-    last_x, last_v = pts[-1]
-    dot_cls = "spark-good" if (last_v >= (hi + lo) / 2) == good_high else "spark-bad"
+    grid = "".join(
+        f'<line x1="{pad_l}" y1="{sy(g):.1f}" x2="{w - pad_r}" y2="{sy(g):.1f}" class="grid"/>'
+        + (f'<text x="{pad_l - 6}" y="{sy(g) + 4:.1f}" class="ax" text-anchor="end">{g}</text>' if g in (0, 50, 100) else "")
+        for g in (0, 25, 50, 75, 100)
+    )
+    target_y = sy(80)
+    reference = (
+        f'<line x1="{pad_l}" y1="{target_y:.1f}" x2="{w - pad_r}" y2="{target_y:.1f}" class="ref-line"/>'
+        f'<text x="{pad_l + 4}" y="{target_y - 4:.1f}" class="ref-label">80% target</text>'
+    )
+
+    line_path = " ".join(f"{'M' if i == 0 else 'L'}{sx(i):.1f},{sy(p['pct']):.1f}" for i, p in enumerate(pts))
+    markers = []
+    for i, p in enumerate(pts):
+        x, y = sx(i), sy(p["pct"])
+        is_long = p["workout_type"] in ("long", "race")
+        title = f"<title>{_esc(p['date'])} ({_esc(p['workout_type'])}): {p['pct']:g}%</title>"
+        if is_long:
+            markers.append(
+                f'<rect x="{x - 4:.1f}" y="{y - 4:.1f}" width="8" height="8" rx="1.5" '
+                f'class="mk-long" transform="rotate(45 {x:.1f} {y:.1f})">{title}</rect>'
+            )
+        else:
+            markers.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" class="mk-easy">{title}</circle>')
+
+    last = pts[-1]
+    lx, ly = sx(n - 1), sy(last["pct"])
+    label_y = ly + 14 if ly < h / 2 else ly - 8  # keep the label clear of the line's own trajectory
+    end_label = f'<text x="{lx - 8:.1f}" y="{label_y:.1f}" text-anchor="end" class="spark-label">{last["pct"]:g}%</text>'
+
+    first_date, last_date = pts[0]["date"][5:], pts[-1]["date"][5:]  # MM-DD, short enough for the axis
+    axis_dates = (
+        f'<text x="{pad_l}" y="{h - 6}" class="ax">{_esc(first_date)}</text>'
+        f'<text x="{w - pad_r}" y="{h - 6}" text-anchor="end" class="ax">{_esc(last_date)}</text>'
+    )
+
     return (
-        f'<svg viewBox="0 0 {w} {h}" class="sparkline" role="img" '
-        f'aria-label="Trend, {len(pts)} recent runs, latest {last_v:g}{unit}">'
-        f'<path d="{path}" class="spark-line" fill="none"/>'
-        f'<circle cx="{sx(last_x):.1f}" cy="{sy(last_v):.1f}" r="3.5" class="{dot_cls}"/>'
-        f'<text x="{w - pad}" y="12" text-anchor="end" class="spark-label">{last_v:g}{unit}</text>'
+        f'<svg viewBox="0 0 {w} {h}" role="img" aria-label='
+        f'"Time in Zone 1+2, {n} recent runs, latest {last["pct"]:g}%">'
+        f"{grid}{reference}"
+        f'<path d="{line_path}" class="spark-line" fill="none"/>'
+        f"{''.join(markers)}{end_label}{axis_dates}"
         "</svg>"
     )
 
@@ -422,12 +463,20 @@ def _render_this_week(plan: TrainingPlan, db: Database, week: TrainingWeek | Non
             elif d < today:
                 status = "missed"
         cls = " ".join(c for c in ["day", is_today and "today", status] if c)
-        body = (
-            f'<div class="day-type">{_esc(run.workout_type)}</div>'
-            f'<div class="day-detail">{run.distance_km:g} km</div>'
-            if not is_rest else '<div class="day-type rest">rest</div>'
-        )
-        cells.append(f'<div class="{cls}"><div class="day-name">{abbr}</div>{body}</div>')
+        if is_rest:
+            body = '<div class="day-type rest">rest</div>'
+            title = ""
+        else:
+            body = (
+                f'<div class="day-type">{_esc(run.workout_type)}</div>'
+                f'<div class="day-detail">{run.distance_km:g} km</div>'
+                f'<div class="day-pace">{_esc(run.target_pace)}</div>'
+            )
+            # target_pace alone omits an MP finish segment ("last 3 km @
+            # 6:45/km") — pace_brief() has the full prescription, shown on
+            # hover/long-press since it doesn't fit the compact cell.
+            title = f' title="{_esc(run.pace_brief())}"'
+        cells.append(f'<div class="{cls}"{title}><div class="day-name">{abbr}</div>{body}</div>')
     return f'<section class="card"><h2>This week</h2><div class="week-grid">{"".join(cells)}</div></section>'
 
 
@@ -458,21 +507,25 @@ def _render_ladder(plan: TrainingPlan, db: Database, today: date) -> str:
 
 
 def _render_full_plan(plan: TrainingPlan) -> str:
+    # A <table> forces its cells onto one line (see the CSS `white-space:
+    # nowrap` rule shared by every other table on the page, which suits short
+    # numeric cells) — the "Sessions" text here is too long for that, and on a
+    # narrow phone that either overflows unreadably or gets crushed down to an
+    # illegible font size. A wrapping block list avoids the problem entirely.
     rows = []
     for w in plan.weeks:
-        cells = " &middot; ".join(
+        sessions = " &middot; ".join(
             f"{WEEKDAY_ABBR[i]} {r.workout_type} {r.distance_km:g}km"
             for i, r in w.run_slots()
         ) or "rest week"
         rows.append(
-            f"<tr><td>{w.week_number}</td><td>{_esc(w.dates)}</td><td>{_esc(w.phase)}</td>"
-            f"<td>{cells}</td><td>{w.weekly_km_target:g}</td></tr>"
+            f'<div class="plan-week"><div class="plan-week-head">'
+            f"<b>Wk {w.week_number}</b> {_esc(w.dates)} &middot; {_esc(w.phase)} "
+            f'&middot; {w.weekly_km_target:g}km target</div>'
+            f'<div class="plan-week-sessions">{sessions}</div></div>'
         )
-    table = (
-        "<table><thead><tr><th>Wk</th><th>Dates</th><th>Phase</th><th>Sessions</th><th>Target km</th>"
-        f"</tr></thead><tbody>{''.join(rows)}</tbody></table>"
-    )
-    return f'<details class="card"><summary>Full plan ({len(plan.weeks)} weeks)</summary>{table}</details>'
+    return f'<details class="card"><summary>Full plan ({len(plan.weeks)} weeks)</summary>' \
+           f'<div class="plan-weeks">{"".join(rows)}</div></details>'
 
 
 def _render_weekly_volume(plan: TrainingPlan, db: Database, today: date) -> str:
@@ -488,12 +541,31 @@ def _render_zone_trend(plan: TrainingPlan, db: Database) -> str:
         return '<section class="card"><h2>Time in Zone 1+2</h2><p class="empty">No HR zone data yet.</p></section>'
     lo, hi, _ = z2
     runs = list(reversed(db.get_recent_activities(limit=15)))
-    values = []
+    dates = {date.fromisoformat(r["start_time"][:10]) for r in runs if r.get("start_time")}
+    points = []
     for r in runs:
+        st = r.get("start_time") or ""
+        try:
+            d = date.fromisoformat(st[:10])
+        except ValueError:
+            continue
         zd = compute_zone_distribution(r.get("hr_zones_json"), r.get("splits_json") or "", lo, hi)
-        values.append(zd["easy_pct"] if zd else None)
-    return f'<section class="card"><h2>Time in Zone 1+2 <span class="hint">last {len(runs)} runs</span></h2>' \
-           f'{_svg_sparkline(values, unit="%")}</section>'
+        # Shift-aware, not get_prescribed_run's exact-date match — a long run
+        # done two days late is still a long run for "why did this dip" to
+        # make sense, and it keeps this chart consistent with the Recent Runs
+        # table below, which already classifies shifted runs this way.
+        resolved = plan.resolve_run_for_date(d, dates - {d})
+        points.append({
+            "date": st[:10],
+            "pct": zd["easy_pct"] if zd else None,
+            "workout_type": resolved.run.workout_type if resolved else "other",
+        })
+    return (
+        f'<section class="card"><h2>Time in Zone 1+2 <span class="hint">last {len(runs)} runs</span></h2>'
+        f'{_svg_zone_trend(points)}'
+        f'<div class="legend"><span class="mk mk-legend-easy"></span>Easy/other'
+        f'<span class="mk mk-legend-long"></span>Long/race</div></section>'
+    )
 
 
 def _render_easy_trend(plan: TrainingPlan, recent: list[dict]) -> str:
@@ -510,7 +582,7 @@ def _render_easy_trend(plan: TrainingPlan, recent: list[dict]) -> str:
         "<table><thead><tr><th>Date</th><th>Dist</th><th>Pace</th><th>HR</th>"
         f"<th>HR/speed</th><th>Drift</th></tr></thead><tbody>{rows}</tbody></table>"
     )
-    return f'<section class="card"><h2>Easy-run pace vs HR</h2>{table}</section>'
+    return f'<section class="card"><h2>Easy-run pace vs HR</h2><div class="table-scroll">{table}</div></section>'
 
 
 def _render_recent_runs(plan: TrainingPlan, recent: list[dict]) -> str:
@@ -595,6 +667,11 @@ h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; ga
   padding: 14px 16px; margin-bottom: 14px;
 }
 .card summary { cursor: pointer; font-size: 15px; font-weight: 600; }
+.plan-weeks { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.plan-week { border-top: 1px solid var(--line); padding-top: 8px; font-size: 12.5px; }
+.plan-week-head { color: var(--ink-2); }
+.plan-week-head b { color: var(--ink); }
+.plan-week-sessions { margin-top: 2px; }
 .empty { color: var(--muted); font-size: 13px; }
 .chips { display: flex; gap: 10px; flex-wrap: wrap; }
 .chip {
@@ -610,6 +687,8 @@ h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; ga
 .day-type { font-size: 12px; font-weight: 600; margin-top: 3px; text-transform: capitalize; }
 .day-type.rest { color: var(--ink-2); font-weight: 400; }
 .day-detail { font-size: 11px; color: var(--ink-2); }
+.day-pace { font-size: 10px; color: var(--ink-2); margin-top: 1px; }
+.day[title] { cursor: help; }
 .day.today { outline: 2px solid var(--accent); }
 .day.done { background: var(--good-bg); }
 .day.missed { background: var(--bad-bg); }
@@ -626,10 +705,15 @@ svg { width: 100%; height: auto; display: block; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 .sw-target { border: 1.5px solid var(--ink-2); }
 .sw-actual { background: var(--accent); }
-.sparkline { max-width: 320px; }
-.spark-line { stroke: var(--accent); stroke-width: 2; }
-.spark-good { fill: var(--good); } .spark-bad { fill: var(--warn); }
-.spark-label { font-size: 11px; fill: var(--ink-2); }
+.spark-line { stroke: var(--line-strong); stroke-width: 1.5; }
+.spark-label { font-size: 12px; font-weight: 600; fill: var(--ink); }
+.ref-line { stroke: var(--accent-2); stroke-width: 1; stroke-dasharray: 4 3; opacity: .7; }
+.ref-label { font-size: 10px; fill: var(--accent-2); }
+.mk-easy { fill: var(--accent); }
+.mk-long { fill: var(--accent-2); }
+.mk { display: inline-block; width: 9px; height: 9px; margin-right: 4px; vertical-align: -1px; }
+.mk-legend-easy { border-radius: 50%; background: var(--accent); }
+.mk-legend-long { background: var(--accent-2); transform: rotate(45deg); }
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--ink-2); font-weight: 600; font-size: 11px; text-transform: uppercase; }

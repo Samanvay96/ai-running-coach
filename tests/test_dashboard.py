@@ -1,13 +1,13 @@
-"""Tests for src/dashboard.py's data-assembly logic.
-
-The HTML/SVG string templates aren't tested directly (pure rendering, no
-branching worth asserting byte-for-byte — consistent with this repo not
-testing format_recovery's exact prose either). What's tested is the one
-genuinely new piece of logic, _weekly_volume_series, plus the small pure
-helpers and an end-to-end smoke test that the whole pipeline doesn't crash
-and produces a well-formed page.
+"""Tests for src/dashboard.py's data-assembly logic, plus a handful of
+render-output assertions for bugs that were real (found from a live phone
+screenshot, not hypothetical): a shifted run misclassified in the zone-trend
+chart, a table that overflowed instead of scrolling, cadence baselines
+leaking future runs into a past run's comparison. The general rule stays
+that HTML/SVG templates aren't tested byte-for-byte — these assertions target
+the specific thing that broke, not the surrounding markup.
 """
 
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -17,7 +17,12 @@ from src.dashboard import (
     _acr_status,
     _ago_string,
     _longest_run_so_far,
+    _render_easy_trend,
+    _render_full_plan,
     _render_recent_runs,
+    _render_this_week,
+    _render_zone_trend,
+    _svg_zone_trend,
     _weekly_volume_series,
     run_dashboard,
 )
@@ -150,6 +155,105 @@ def test_ago_string_fresh_within_the_hour():
     s, stale = _ago_string(recent)
     assert stale is False
     assert "min ago" in s
+
+
+# ---------------- _svg_zone_trend ----------------
+
+
+def test_zone_trend_chart_has_a_fixed_axis_and_target_reference():
+    """The original bug: a plain sparkline autoscaled its y-axis to just the
+    shown points, so the reader had no way to tell a real dip from noise on a
+    metric (a %) that has a natural 0-100 domain and an explicit 80% target."""
+    points = [
+        {"date": "2026-08-01", "pct": 95.0, "workout_type": "easy"},
+        {"date": "2026-08-03", "pct": 68.0, "workout_type": "long"},
+        {"date": "2026-08-05", "pct": 90.0, "workout_type": "easy"},
+    ]
+    svg = _svg_zone_trend(points)
+    assert ">0<" in svg and ">50<" in svg and ">100<" in svg  # fixed axis labels present
+    assert "80% target" in svg
+    assert 'class="mk-long"' in svg   # the long run gets a shape-coded marker
+    assert 'class="mk-easy"' in svg
+
+
+def test_zone_trend_chart_shows_empty_state_below_two_points():
+    assert "Not enough data" in _svg_zone_trend([{"date": "2026-08-01", "pct": 90.0, "workout_type": "easy"}])
+
+
+# ---------------- _render_zone_trend: shift-aware classification ----------------
+
+
+def _save_run_with_zones(db: Database, activity_id: int, day: str, easy_pct_zones: list[int]) -> None:
+    """easy_pct_zones: [secs_in_z1, secs_in_z2, secs_in_z3plus]."""
+    import json
+    hr_zones_json = json.dumps([
+        {"zoneNumber": 1, "secsInZone": easy_pct_zones[0]},
+        {"zoneNumber": 2, "secsInZone": easy_pct_zones[1]},
+        {"zoneNumber": 3, "secsInZone": easy_pct_zones[2]},
+    ])
+    db.save_activity(
+        activity_id=activity_id, start_time=f"{day} 08:00:00", activity_type="running",
+        distance_km=10.0, duration_seconds=4000, avg_pace="6:40",
+        avg_hr=145, max_hr=160, calories=600, aerobic_te=3.0,
+        vo2max=None, raw_json="{}", splits_json="[]", hr_zones_json=hr_zones_json,
+    )
+
+
+def test_zone_trend_classifies_a_shifted_long_run_as_long_not_other(two_week_env):
+    """Regression: get_prescribed_run is exact-date only, so a long run done
+    two days late used to fall through to "other" — inconsistent with the
+    Recent Runs table below it, which already resolves shifts correctly."""
+    plan, db = two_week_env
+    db.save_hr_zones(
+        fetched_date="2026-03-01", sport="RUNNING", training_method="HR_RESERVE",
+        max_hr=190, resting_hr=45, floors={1: 100, 2: 137, 3: 153, 4: 166, 5: 180},
+        raw_json="{}",
+    )
+    _save_run_with_zones(db, 1, "2026-03-03", [0, 850, 150])   # Tue week 1, its own slot
+    _save_run_with_zones(db, 2, "2026-03-09", [0, 680, 320])   # Mon — week 1's Sat long run, 2 days late
+    _save_run_with_zones(db, 3, "2026-03-10", [0, 900, 100])   # Tue week 2, its own slot — blocks the
+    # nearer 1-day candidate so 03-09 has nothing closer to resolve to than Saturday's long run (2 days)
+    html = _render_zone_trend(plan, db)
+    assert "2026-03-09 (long)" in html
+    assert "2026-03-09 (other)" not in html
+
+
+# ---------------- table/layout fixes (mobile: cut-off / illegibly small) ----------------
+
+
+def test_easy_trend_table_is_wrapped_for_horizontal_scroll(two_week_env):
+    plan, db = two_week_env
+    _save_run(db, 1, "2026-03-03", km=5.0)
+    _save_run(db, 2, "2026-03-10", km=5.0)
+    recent = db.get_recent_activities(limit=10)
+    html = _render_easy_trend(plan, recent)
+    if "<table>" in html:  # only meaningful once there are >=2 easy runs to trend
+        assert '<div class="table-scroll">' in html
+
+
+def test_full_plan_wraps_instead_of_forcing_a_wide_unreadable_table(two_week_env):
+    """A <table> here forces every row onto one line (white-space: nowrap,
+    shared with every other table on the page) — fine for short numeric
+    cells, but the free-text "Sessions" column made rows so wide the page
+    either cut them off or shrank the whole table to an illegible size on a
+    phone. A wrapping block list sidesteps the problem."""
+    plan, _ = two_week_env
+    html = _render_full_plan(plan)
+    assert "<table" not in html
+    assert 'class="plan-weeks"' in html
+    assert "Wk 1" in html and "Wk 2" in html
+
+
+def test_this_week_grid_shows_pace_and_a_hover_title(two_week_env):
+    """The pace band is shown inline for a glance, and the full pace_brief()
+    (which can carry an MP-finish segment too long for the cell) is on the
+    title attribute for hover/long-press."""
+    plan, db = two_week_env
+    week = plan.get_week_for_date(date(2026, 3, 2))
+    html = _render_this_week(plan, db, week, date(2026, 3, 3))
+    assert "day-pace" in html
+    assert 'title="' in html
+    assert re.search(r"\d:\d\d", html)  # some pace text made it into the cell
 
 
 # ---------------- _render_recent_runs ----------------

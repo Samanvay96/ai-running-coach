@@ -804,12 +804,29 @@ def test_v7_retires_the_stale_rationale(v7):
 
 
 def test_v7_guidance_blocks(v7):
+    """Blocks parse in sheet order. FUELLING was added on Sep 06 once the race
+    gel was settled — it sits on the Pace Guide sheet, after the PF rules."""
     assert [b.title for b in v7.guidance] == [
         "WHY PACE IS NOT THE TARGET",
         "LONG RUN PACING RULE",
         "PLANTAR FASCIITIS RULES",
+        "FUELLING — TESTED (Sep 06)",
         "THE ONE RULE",
     ]
+
+
+def test_v7_fuelling_block_names_the_race_gel(v7):
+    """"Nothing new on race day" only means something if the plan says which
+    gel — both in the guidance block and in the race-day fuelling table.
+
+    It has to be the + Electrolyte product specifically: the standard GO
+    Isotonic carries ~4 mg sodium, which is why the race gel was switched.
+    """
+    block = next(b for b in v7.guidance if b.title.startswith("FUELLING"))
+    assert any("+ Electrolyte" in line for line in block.lines)
+    gels = [f for f in v7.fueling if "gel" in f.what.lower()]
+    assert len(gels) == 5
+    assert all("SiS GO Isotonic + Electrolyte" in f.what for f in gels)
 
 
 def test_v7_race_day_and_benchmarks_unchanged(v7, v6):

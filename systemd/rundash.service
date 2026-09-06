@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Coach Dashboard Webserver
+After=network.target
+
+[Service]
+Type=simple
+User=skarambhe
+WorkingDirectory=/home/skarambhe/Projects/ai-running-coach/dashboard
+ExecStart=/usr/bin/python3 /home/skarambhe/Projects/ai-running-coach/dashboard/server.py 8082
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

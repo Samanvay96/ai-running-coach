@@ -48,7 +48,7 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 
 ## 🏗️ Architecture
 
-Four scheduled jobs + one always-on bot, all running under systemd on a Raspberry Pi:
+Four scheduled jobs + one always-on bot + a chained dashboard regenerate, all running under systemd on a Raspberry Pi:
 
 ```
 Garmin Connect ──(every 1h)──> Poller ──(new run?)──> LLM Analysis ──> Telegram
@@ -58,7 +58,9 @@ Garmin Connect ──(every 1h)──> Poller ──(new run?)──> LLM Analys
                                   └── tz_offset_minutes per activity (auto-tracks travel)
                                           ↓
                                           ├──(after each run)── Backup → Telegram
-                                          ↓
+                                          ├──(OnSuccess=)────── Dashboard regenerate → data/dashboard/index.html
+                                          │                        served by rundash.service on :8082
+                                          ↓                        (Mission Control tile, LAN-only, no auth)
        (daily 02:00) ─────── Backup timer ──→ data/backups/coach-YYYYMMDD.db.gz
        (daily 08:00) ─────── Alerts timer ──→ Wellness nudge + poller heartbeat → Telegram
        (hourly, gated) ────── Prerun timer ──→ Morning brief at 06:00 runner-local → Telegram

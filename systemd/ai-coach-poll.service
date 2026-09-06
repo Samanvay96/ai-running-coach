@@ -1,6 +1,11 @@
 [Unit]
 Description=AI Running Coach Garmin Poller
 After=network.target
+# Chained rather than a separate timer so the dashboard is never more than one
+# poll cycle stale. Note: poller.py's poll() returns early (no sys.exit(1)) on
+# a Garmin login failure, so this still fires even after a failed poll —
+# harmless, the dashboard just re-renders against unchanged data.
+OnSuccess=ai-coach-dashboard.service
 
 [Service]
 Type=oneshot

@@ -19,15 +19,18 @@ from src.coach import (
     Coach,
     _extract_text,
     _format_weekly_target,
+    _splits_list,
     compute_acr,
     compute_adherence,
     compute_cadence_context,
+    compute_hr_drift,
     compute_mileage_delta,
     compute_weekly_target,
     format_cadence_context,
     compute_zone_distribution,
     format_feel,
     format_recovery,
+    format_splits,
     format_weather,
     heat_note,
     resolve_runner_today,
@@ -286,6 +289,80 @@ def test_heat_note_fires_for_warm_and_humid():
 
 def test_heat_note_quiet_in_cool_conditions():
     assert heat_note({"temp_c": 12, "humidity_pct": 60}) == ""
+
+
+# ---------------- watch-stop residual split ----------------
+#
+# Garmin flushes whatever distance is left as a final "lap" when the watch is
+# stopped, even if that's a couple of metres recorded a few seconds after the
+# run itself finished. A real case (2026-09-11, activity 24318418514): 5 real
+# ~1000m splits, then a 6th of 7.89m in 1.98s -> averageSpeed computes to a
+# 4:11/km pace on an easy run that averaged 6:00/km, which read as a genuine
+# surge/anomaly worth flagging — it wasn't, it was time-to-press-stop.
+
+_REAL_SPLITS = [
+    {"distance": 1000.0, "duration": 334.2, "averageSpeed": 2.99, "averageHR": 136},
+    {"distance": 1000.0, "duration": 355.3, "averageSpeed": 2.81, "averageHR": 148},
+    {"distance": 1000.0, "duration": 355.9, "averageSpeed": 2.81, "averageHR": 145},
+    {"distance": 1000.0, "duration": 375.9, "averageSpeed": 2.66, "averageHR": 147},
+    {"distance": 1000.0, "duration": 382.2, "averageSpeed": 2.62, "averageHR": 144},
+]
+_WATCH_STOP_RESIDUAL = {"distance": 7.89, "duration": 1.984, "averageSpeed": 3.977, "averageHR": 150}
+
+
+def test_splits_list_drops_a_trailing_watch_stop_residual():
+    result = _splits_list(_REAL_SPLITS + [_WATCH_STOP_RESIDUAL])
+    assert len(result) == 5
+    assert result == _REAL_SPLITS
+
+
+def test_splits_list_keeps_a_genuine_partial_final_km():
+    """A final split under 1000m isn't automatically noise — only one under
+    the residual threshold is. 870m is a real partial last kilometre."""
+    real_partial = {"distance": 870.0, "duration": 320.0, "averageSpeed": 2.7, "averageHR": 140}
+    result = _splits_list(_REAL_SPLITS + [real_partial])
+    assert len(result) == 6
+    assert result[-1] == real_partial
+
+
+def test_splits_list_only_trims_the_trailing_split_not_a_leading_one():
+    """The artifact only ever happens at the end (watch stopped after
+    finishing) — a small first split (e.g. a slow GPS lock) must survive."""
+    small_first = {"distance": 50.0, "duration": 40.0, "averageSpeed": 1.25, "averageHR": 110}
+    result = _splits_list([small_first] + _REAL_SPLITS)
+    assert len(result) == 6
+    assert result[0] == small_first
+
+
+def test_splits_list_handles_an_all_residual_list_without_crashing():
+    assert _splits_list([_WATCH_STOP_RESIDUAL]) == []
+
+
+def test_splits_list_does_not_treat_a_missing_distance_as_zero():
+    """compute_zone_distribution's HR-only fallback path passes splits with
+    no "distance" field at all — a missing value is not the same as a 0m
+    residual and must never be trimmed on that basis."""
+    hr_only_splits = [
+        {"averageHR": 120, "duration": 300},
+        {"averageHR": 140, "duration": 300},
+        {"averageHR": 160, "duration": 300},
+    ]
+    assert _splits_list(hr_only_splits) == hr_only_splits
+
+
+def test_format_splits_omits_the_watch_stop_residual_line():
+    text = format_splits(_REAL_SPLITS + [_WATCH_STOP_RESIDUAL])
+    assert "Km 6" not in text
+    assert text.strip().splitlines()[-1].startswith("  Km 5:")
+
+
+def test_compute_hr_drift_is_unaffected_by_the_watch_stop_residual():
+    """The residual isn't just cosmetic in the prompt text — compute_hr_drift
+    averages splits unweighted, so a 2-second split got the same voice as a
+    full ~6-minute one and skewed which splits land in which half."""
+    with_residual = compute_hr_drift(_REAL_SPLITS + [_WATCH_STOP_RESIDUAL])
+    without = compute_hr_drift(_REAL_SPLITS)
+    assert with_residual == without
 
 
 # ---------------- zone distribution ----------------

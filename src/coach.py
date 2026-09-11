@@ -205,24 +205,10 @@ def format_duration(seconds: float) -> str:
 
 def format_splits(splits_data) -> str:
     """Format per-km splits for the prompt."""
-    if not splits_data:
-        return "No split data available"
-    if isinstance(splits_data, str):
-        try:
-            splits_data = json.loads(splits_data)
-        except (json.JSONDecodeError, TypeError):
-            return "No split data available"
-
-    # Handle the Garmin splits format
-    split_list = splits_data
-    if isinstance(splits_data, dict):
-        split_list = splits_data.get("lapDTOs", splits_data.get("splitDTOs", []))
-
+    split_list = _splits_list(splits_data)
     lines = []
     for i, split in enumerate(split_list):
         if isinstance(split, dict):
-            dist = split.get("distance", 0) / 1000
-            duration = split.get("duration", 0)
             avg_hr = split.get("averageHR", "")
             pace = format_pace(split.get("averageSpeed", 0))
             hr_str = f" | HR {avg_hr}" if avg_hr else ""
@@ -244,8 +230,40 @@ def format_recent_activities(activities: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# A final "lap" under this many metres isn't a real partial kilometre — it's
+# the residual Garmin flushes as a lap when the watch is stopped a few
+# seconds after the run itself has actually finished. Left in, its near-zero
+# distance over a couple of seconds computes to a wild pace (observed: 7.89 m
+# in 1.98 s -> 4:11/km on an easy run averaging 6:00/km) that reads as a real
+# surge or GPS anomaly to anyone — or anything — looking at the splits; in
+# compute_hr_drift it also gets the same unweighted averaging as a full
+# ~5-6 minute split despite representing a couple of seconds of standing
+# around. A genuine partial final km (total distance not a whole number of
+# km) is real data and stays — only a stop-button artifact this small drops.
+_RESIDUAL_SPLIT_MAX_M = 100
+
+
+def _drop_watch_stop_residual(splits: list[dict]) -> list[dict]:
+    """Strip a trailing split under _RESIDUAL_SPLIT_MAX_M metres, if any.
+
+    Only trims when the last split actually carries a "distance" field —
+    some callers (compute_zone_distribution's HR-only fallback) pass splits
+    with no distance at all, and a missing value must never be read as 0.
+    """
+    if not splits or not isinstance(splits[-1], dict):
+        return splits
+    last_distance = splits[-1].get("distance")
+    if last_distance is not None and last_distance < _RESIDUAL_SPLIT_MAX_M:
+        return splits[:-1]
+    return splits
+
+
 def _splits_list(splits_data) -> list[dict]:
-    """Normalize splits_json (str or dict or list) into a flat list of split dicts."""
+    """Normalize splits_json (str or dict or list) into a flat list of split
+    dicts, with any trailing watch-stop residual lap dropped — see
+    _drop_watch_stop_residual. Every caller (format_splits, compute_hr_drift,
+    compute_zone_distribution's fallback) goes through here, so none of them
+    need their own filtering."""
     if not splits_data:
         return []
     if isinstance(splits_data, str):
@@ -254,9 +272,9 @@ def _splits_list(splits_data) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             return []
     if isinstance(splits_data, dict):
-        return splits_data.get("lapDTOs", splits_data.get("splitDTOs", []))
+        return _drop_watch_stop_residual(splits_data.get("lapDTOs", splits_data.get("splitDTOs", [])))
     if isinstance(splits_data, list):
-        return splits_data
+        return _drop_watch_stop_residual(splits_data)
     return []
 
 

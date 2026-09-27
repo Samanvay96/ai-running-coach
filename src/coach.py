@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import anthropic
 
-from .config import RACE_DATE, PLAN_START_DATE, MAX_HR, RUNNER_TIMEZONE, RUNNER_TZ
+from .config import MAX_HR, RUNNER_TIMEZONE, RUNNER_TZ
 from .db import Database
 from .time_utils import format_utc_offset
 from .training_plan import ResolvedRun, TrainingPlan, TrainingWeek
@@ -880,7 +880,7 @@ class Coach:
 
         total_plan_weeks = len(self.plan.weeks)
         guidance = self.plan.get_guidance_text()
-        return f"""You are a knowledgeable and encouraging running coach for a runner racing the Lisbon Marathon on Saturday October 10, 2026 — {self.plan.get_goal_summary()}.
+        return f"""You are a knowledgeable and encouraging running coach for a runner racing the {self.plan.get_goal_summary()}.
 
 TRAINING PLAN — {self.plan.title}:
 - {total_plan_weeks} weeks total. Current phase: {phase_banner or week_info}
@@ -1190,19 +1190,18 @@ next line(s), with a blank line between sections — never "**Header:** text…"
 
     def _race_countdown(self) -> dict:
         today, _ = resolve_runner_today(self.db)
-        days_remaining = (RACE_DATE - today).days
+        days_remaining = (self.plan.race_date - today).days
         total_weeks = len(self.plan.weeks) or 1
         # Prefer the plan's own week numbering when today is in-plan; that way
-        # "Week N/M" lines up with the xlsx even across non-uniform gaps (e.g.
-        # the 3-week time-off span between Wk5 and Wk6 in v5).
+        # "Week N/M" lines up with the plan file's own numbering.
         plan_week = self.plan.get_week_for_date(today)
         if plan_week:
             current_week = plan_week.week_number
         else:
-            elapsed_weeks = (today - PLAN_START_DATE).days / 7
+            elapsed_weeks = (today - self.plan.start_date).days / 7
             current_week = min(max(int(elapsed_weeks) + 1, 1), total_weeks)
         pct_complete = min(current_week / total_weeks * 100, 100)
-        weeks_remaining = max((RACE_DATE - today).days / 7, 0)
+        weeks_remaining = max((self.plan.race_date - today).days / 7, 0)
         return {
             "days_remaining": days_remaining,
             "current_week": current_week,
@@ -1275,7 +1274,7 @@ next line(s), with a blank line between sections — never "**Header:** text…"
 WEEK: {week_info} ({week_start} to {week_end})
 
 RACE COUNTDOWN:
-- Lisbon Marathon: {countdown['days_remaining']} days away
+- {self.plan.race_name}: {countdown['days_remaining']} days away
 - Training progress: Week {countdown['current_week']}/{countdown['total_weeks']} ({countdown['pct_complete']}% complete)
 - Weeks remaining: {countdown['weeks_remaining']}
 

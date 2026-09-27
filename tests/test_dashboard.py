@@ -28,7 +28,7 @@ from src.dashboard import (
 )
 from src.db import Database
 from src.training_plan import TrainingPlan
-from test_training_plan import _write_two_week_workbook
+from test_training_plan import _write_two_week_plan
 
 
 def _save_run(db: Database, activity_id: int, day: str, km: float = 20.0) -> None:
@@ -44,7 +44,7 @@ def _save_run(db: Database, activity_id: int, day: str, km: float = 20.0) -> Non
 def two_week_env(tmp_path):
     """Two consecutive plan weeks (Tue 5km + Sat 20km / 22km), for shift and
     week-boundary cases. Mon 2026-03-02..Sun 03-08 then Mon 03-09..Sun 03-15."""
-    plan = TrainingPlan(str(_write_two_week_workbook(tmp_path / "two_week.xlsx")))
+    plan = TrainingPlan(str(_write_two_week_plan(tmp_path / "two_week.yaml")))
     db = Database(tmp_path / "two_week.db")
     yield plan, db
     db.close()
@@ -301,7 +301,7 @@ class _FrozenDate(date):
 
 def test_run_dashboard_end_to_end_smoke(two_week_env, tmp_path, monkeypatch):
     plan, db = two_week_env
-    plan_path = tmp_path / "two_week.xlsx"  # already written by the fixture
+    plan_path = tmp_path / "two_week.yaml"  # already written by the fixture
     _save_run(db, 1, "2026-03-03", km=5.0)
     _save_run(db, 2, "2026-03-07", km=20.0)
     db.close()  # run_dashboard opens its own connection
@@ -325,8 +325,8 @@ def test_run_dashboard_survives_a_render_error_and_keeps_the_prior_file(tmp_path
     the caller (systemd) only cares about the exit code."""
     from src.db import Database as DB
 
-    plan_path = tmp_path / "broken.xlsx"
-    plan_path.write_text("not a real workbook")  # openpyxl will fail to load this
+    plan_path = tmp_path / "broken.yaml"
+    plan_path.write_text("weeks: [unclosed")  # not valid YAML
     DB(tmp_path / "empty.db").close()
 
     out_dir = tmp_path / "out"

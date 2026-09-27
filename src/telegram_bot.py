@@ -9,7 +9,7 @@ from telegram import Bot, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH, RACE_DATE, PLAN_START_DATE
+from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, TRAINING_PLAN_PATH, DB_PATH
 from .db import Database
 from .training_plan import TrainingPlan
 from .coach import Coach, compute_adherence, compute_weekly_target
@@ -225,7 +225,7 @@ class CoachBot:
         # Race countdown header
         countdown = self.coach._race_countdown()
         countdown_text = (
-            f"**Race:** {countdown['days_remaining']} days to Lisbon Marathon\n"
+            f"**Race:** {countdown['days_remaining']} days to {self.plan.race_name}\n"
             f"**Plan:** Week {countdown['current_week']}/{countdown['total_weeks']} "
             f"({countdown['pct_complete']}% complete)\n"
             f"**Weeks remaining:** {countdown['weeks_remaining']}\n\n"

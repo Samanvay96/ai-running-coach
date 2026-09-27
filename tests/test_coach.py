@@ -43,7 +43,7 @@ from src.training_plan import TrainingPlan
 def _plan_or_skip() -> TrainingPlan:
     """Load the runner's real plan, or skip.
 
-    The workbooks hold personal training data and are gitignored, so they exist
+    plan.yaml holds personal training data and are gitignored, so they exist
     locally but not in a fresh clone. These tests exercise the coach against the
     live plan; without it there is nothing meaningful to assert.
     """
@@ -610,17 +610,20 @@ def test_chat_returns_text_with_rich_context(coach):
 # string around that, so the model has no reason to divide by calendar days.
 
 
-def test_compute_weekly_target_excludes_rest_days_from_remaining_runs():
-    plan = _plan_or_skip()
-    db = Database(DB_PATH)
-    # 2026-05-18 is a Monday; the v5 plan schedules runs on Mon/Wed/Fri for
-    # this base-bridge week, so after Monday only Wed + Fri should remain.
-    t = compute_weekly_target(plan, db, date(2026, 5, 18))
+def test_compute_weekly_target_excludes_rest_days_from_remaining_runs(tmp_path):
+    from test_training_plan import _write_plan
+
+    plan = TrainingPlan(str(_write_plan(tmp_path / "p.yaml")))
+    db = Database(tmp_path / "t.db")
+    # Fixture week runs Tue (5 km) + Sat (20 km); Monday's loading session is
+    # not a run, so after Monday only Tue + Sat remain.
+    t = compute_weekly_target(plan, db, date(2026, 3, 2))
+    db.close()
     assert t is not None
     assert t["remaining_runs_count"] == 2
     weekdays = [r["weekday"] for r in t["remaining_runs"]]
-    assert weekdays == ["Wed", "Fri"]
-    assert t["remaining_runs_km"] == sum(r["km"] for r in t["remaining_runs"])
+    assert weekdays == ["Tue", "Sat"]
+    assert t["remaining_runs_km"] == 25
 
 
 def test_format_weekly_target_uses_runs_not_days():
@@ -766,12 +769,12 @@ def shift_env(tmp_path):
     """Synthetic one-week plan + empty DB.
 
     The fixture week is Mon 2026-03-02 – Sun 03-08, running Tue (easy 5 km) and
-    Sat (long 20 km). Built here rather than loaded from the real workbook so
+    Sat (long 20 km). Built here rather than loaded from the real plan so
     these run in a fresh clone, where the plan is gitignored.
     """
-    from test_training_plan import _write_workbook
+    from test_training_plan import _write_plan
 
-    plan = TrainingPlan(str(_write_workbook(tmp_path / "shift.xlsx", week_header_row=5)))
+    plan = TrainingPlan(str(_write_plan(tmp_path / "shift.yaml")))
     db = Database(tmp_path / "shift.db")
     yield plan, db
     db.close()
@@ -820,9 +823,9 @@ def test_adherence_does_not_let_one_run_cover_two_slots(shift_env):
 def shift_env_two_weeks(tmp_path):
     """Two consecutive plan weeks (Tue + Sat runs each), for shifts that cross
     the week boundary — a Saturday long run done the following Monday."""
-    from test_training_plan import _write_two_week_workbook
+    from test_training_plan import _write_two_week_plan
 
-    plan = TrainingPlan(str(_write_two_week_workbook(tmp_path / "two_week.xlsx")))
+    plan = TrainingPlan(str(_write_two_week_plan(tmp_path / "two_week.yaml")))
     db = Database(tmp_path / "two_week.db")
     yield plan, db
     db.close()

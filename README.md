@@ -42,9 +42,9 @@ A personal AI running coach that monitors your Garmin activities and delivers co
 
 **🗓️ Plan context**
 - Current training week, phase, and prescribed run for today
-- Pace zones from the Pace Guide sheet
+- Pace zones from the plan file
 - Race countdown and benchmark targets
-- Plan reloads on every Telegram command — no restart needed when you edit the xlsx
+- Plan reloads on every Telegram command — no restart needed when you edit `plan.yaml`
 
 ## 🏗️ Architecture
 
@@ -116,22 +116,33 @@ RUNNER_TIMEZONE=Europe/London
 
 ### 3️⃣ Add your training plan
 
-Place your training plan Excel file in the project root. The parser expects an `.xlsx` file with these sheets:
+Write your plan as `plan.yaml` in the project root (it is gitignored — it holds personal training data). The schema is documented at the top of `src/training_plan.py`; the shape is:
 
-- 📋 **Training Plan** — week-by-week schedule. Row 1 is the plan title, row 2 the goal line (`Race: … | Target: 4:45–5:00 (~6:50/km) | …`), row 3 the revision note. Below that, a header row starting with `Week`, then columns `Week`, `Dates`, `Phase`, `Mon`…`Sun`, `Weekly km`, … , `Notes`. Rows whose first cell isn't a number are treated as phase banners (`PHASE 3: BASE REBUILD — …`) and attach to the weeks beneath them.
-- 🎚️ **Pace Guide** — pace zones under a header row starting with `Run Type`, with heart rate targets (e.g. `Zone 2 (60-70% max HR)`)
-- 🏁 **Race Day Plan** — splits under a `Split` header row, fuelling under a `When` header row
-- 📈 **Benchmarks** *(optional)* — progress checkpoints under a `Checkpoint` (or legacy `Distance`) header row
+```yaml
+title: MY MARATHON — BUILD PLAN (v1)
+revision: Why the plan looks the way it does. Fed to the coach.
+race: {name: Manchester Marathon, date: 2027-04-18, goal: "4:45", goal_pace: "6:45/km"}
+zones:
+  - {type: easy, label: Easy, pace: "6:20–6:45/km", hr: "Zone 2 (60-70% max HR), HR ≤150", feel: Conversational.}
+guidance:
+  PLANTAR FASCIITIS RULES: ["• Track AM first-step pain 0-10 daily."]
+weeks:
+  - n: 1
+    start: 2026-09-28          # a Monday; weeks must be contiguous
+    phase: Base
+    target_km: 20
+    mon: Foot/calf loading     # a string is a non-run day
+    tue: {type: easy, km: 6}
+    sat: {type: long, km: 14, finish: {km: 3, pace: "6:45/km"}, note: "..."}
+```
 
-Tables are located by their header cell, not by fixed row numbers, so inserting or removing rows above them is safe.
+- **Quote every pace.** YAML reads a bare `6:45` as the base-60 number 405; the loader refuses the file rather than guess.
+- **Session types** are `easy`, `long`, `race`, `shakeout`, `mp_tempo`, `tempo`, `intervals`. A session without a `pace` takes it from the first zone of its type whose optional `km: [min, max]` band fits the distance.
+- **Race name, date and goal are read from the file, not from code.** They drive every coaching prompt, the dashboard countdown and the bot header.
+- **`guidance` blocks** (e.g. `PLANTAR FASCIITIS RULES`) are passed to the model as plan rules that override its generic marathon-coaching instincts.
+- **A bad edit fails loudly**, naming the field (`weeks[3].tue.type: 'eazy' is not one of …`), and a failed reload keeps the last good plan loaded.
 
-**The goal is read from the sheet, not from code.** `Target:` in the goal line drives every coaching prompt, so changing the target in the xlsx changes what the coach coaches toward — there is no finish time or target pace hardcoded in `src/config.py`.
-
-**Free-text rules blocks are parsed too.** Any single-column block below a sheet's table — a title row followed by bullet lines, e.g. `PLANTAR FASCIITIS RULES` or `LONG RUN PACING RULE` — is collected and passed to the model as plan rules that override its generic marathon-coaching instincts. Blocks with no body lines (section labels like `FUELLING STRATEGY`) are skipped.
-
-Update `TRAINING_PLAN_PATH` in `src/config.py` if your filename differs.
-
-> ✏️ Edits to the xlsx are picked up automatically — the bot reloads the plan on every command via mtime check.
+> ✏️ Edits are picked up automatically — the bot reloads the plan on every command via mtime check.
 
 ### 4️⃣ Run the setup script
 
@@ -259,7 +270,7 @@ Snapshots use SQLite's `.backup()` API, so they're atomic even while the bot is 
 
 ## 🧪 Tech Stack
 
-- 🐍 **Python 3** with `garminconnect`, `python-telegram-bot`, `anthropic`, `openpyxl`
+- 🐍 **Python 3** with `garminconnect`, `python-telegram-bot`, `anthropic`, `PyYAML`
 - 💾 **SQLite** for activity history, daily wellness, session tokens, conversation state, and alert dedup
 - ⚙️ **systemd** for process management on Raspberry Pi (4 timers + 1 always-on service)
 - 🤖 **Anthropic Claude (Sonnet 4.6)** with adaptive thinking for run analysis and weekly summaries

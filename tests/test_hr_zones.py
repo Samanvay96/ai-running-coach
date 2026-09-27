@@ -25,14 +25,11 @@ from src.db import Database
 from src.garmin_client import select_hr_zone_entry
 from src.training_plan import TrainingPlan
 
-# Gitignored: holds personal training data, so absent from a fresh clone.
-V7 = "Lisbon_Marathon_Finish_Plan_v7.xlsx"
 
 
-def _load_or_skip(path: str) -> TrainingPlan:
-    if not Path(path).exists():
-        pytest.skip(f"{path} not present (gitignored — personal training data)")
-    return TrainingPlan(path)
+def _synthetic_plan(tmp_path_factory) -> TrainingPlan:
+    from test_training_plan import _write_plan
+    return TrainingPlan(str(_write_plan(tmp_path_factory.mktemp("plan") / "p.yaml")))
 
 
 # The real payload, as returned by /biometric-service/heartRateZones.
@@ -58,8 +55,8 @@ def db(tmp_path) -> Database:
 
 
 @pytest.fixture(scope="module")
-def plan() -> TrainingPlan:
-    return _load_or_skip(V7)
+def plan(tmp_path_factory) -> TrainingPlan:
+    return _synthetic_plan(tmp_path_factory)
 
 
 def _store(db: Database, entry: dict, fetched_date: str = "2026-07-30"):
@@ -195,10 +192,10 @@ def test_fallback_without_rhr_still_resolves(db, plan):
     assert "RHR unavailable" in provenance
 
 
-def test_returns_none_when_no_source_can_produce_a_band(db, plan):
+def test_returns_none_when_no_source_can_produce_a_band(db, tmp_path_factory):
     """Empty pace zones and no Garmin snapshot — callers must handle None
     rather than get a bogus band."""
-    stripped = _load_or_skip(V7)
+    stripped = _synthetic_plan(tmp_path_factory)
     stripped.pace_zones = []
     assert resolve_z2_bounds(db, stripped) is None
 

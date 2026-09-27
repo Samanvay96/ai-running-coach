@@ -38,16 +38,15 @@ from src.coach import (
     fulfilled_slots,
     resolve_z2_bounds,
 )
-from src.config import DB_PATH, PLAN_START_DATE, RACE_DATE, TRAINING_PLAN_PATH
+from src.config import DB_PATH, TRAINING_PLAN_PATH
 from src.db import Database
 from src.telegram_bot import send_error_alert
 from src.training_plan import PrescribedRun, TrainingPlan, TrainingWeek
 
 DASHBOARD_DIR = DB_PATH.parent / "dashboard"
 
-# Not carried as a structured field in the plan xlsx (TrainingPlan.target_finish
-# / .target_pace are goal-TIME strings, not the race distance) — documented here
-# rather than re-derived from the plan's own race-day row each time.
+# The plan carries a goal TIME (TrainingPlan.target_finish), not the race
+# distance, so the marathon distance lives here.
 MARATHON_KM = 42.195
 
 WEEKDAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -357,13 +356,14 @@ def _svg_ladder(entries: list[dict]) -> str:
 
 
 def _render_header(plan: TrainingPlan, today: date, week: TrainingWeek | None, ago: str, stale: bool) -> str:
-    days_to_race = (RACE_DATE - today).days
+    race_date = plan.race_date
+    days_to_race = (race_date - today).days
     if days_to_race < 0:
-        race_line = f"Race day was {RACE_DATE.strftime('%b %d')} — hope it went well."
+        race_line = f"Race day was {race_date.strftime('%b %d')} — hope it went well."
     elif days_to_race == 0:
         race_line = "Race day."
     else:
-        race_line = f"T-{days_to_race} days to {RACE_DATE.strftime('%b %d')}"
+        race_line = f"T-{days_to_race} days to {race_date.strftime('%b %d')}"
     week_line = f"Week {week.week_number} &middot; {_esc(week.phase)}" if week else "Outside plan window"
     stale_cls = " stale" if stale else ""
     return f"""
@@ -529,7 +529,7 @@ def _render_full_plan(plan: TrainingPlan) -> str:
 
 
 def _render_weekly_volume(plan: TrainingPlan, db: Database, today: date) -> str:
-    series = _weekly_volume_series(plan, db, PLAN_START_DATE, today)
+    series = _weekly_volume_series(plan, db, plan.start_date, today)
     return f'<section class="card"><h2>Weekly volume</h2>{_svg_volume_chart(series)}' \
            f'<div class="legend"><span class="sw sw-target"></span>Prescribed' \
            f'<span class="sw sw-actual"></span>Actual</div></section>'
@@ -773,7 +773,7 @@ def run_dashboard(
                 compute_acr(db, today),
                 compute_mileage_delta(db, today),
                 compute_adherence(plan, db, today, lookback_runs=10),
-                _longest_run_so_far(db, PLAN_START_DATE, today),
+                _longest_run_so_far(db, plan.start_date, today),
             ),
             _render_recovery(db.get_latest_wellness()),
             _render_this_week(plan, db, week, today),

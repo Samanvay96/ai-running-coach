@@ -37,13 +37,10 @@ def _import_format(monkeypatch=None):
         ("ANTHROPIC_API_KEY", "x"), ("RUNNER_AGE", "30"),
     ]:
         os.environ.setdefault(var, val)
-    # Stub anthropic / openpyxl / dotenv ONLY if they're not already installed.
-    # Previously this unconditionally overwrote `openpyxl.load_workbook` etc. on
-    # the real module, which silently broke any later test (e.g. test_coach)
-    # that actually tried to load the xlsx.
+    # Stub anthropic / dotenv ONLY if they're not already installed. Overwriting
+    # attributes on the real modules silently breaks later tests that use them.
     stubs = [
         ("anthropic", "Anthropic", type("A", (), {"__init__": lambda self, **kw: None})),
-        ("openpyxl", "load_workbook", lambda *a, **kw: None),
         ("dotenv", "load_dotenv", lambda *a, **kw: None),
     ]
     for name, attr, val in stubs:

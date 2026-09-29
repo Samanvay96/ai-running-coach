@@ -18,7 +18,8 @@ from src.dashboard import (
     _ago_string,
     _longest_run_so_far,
     _render_easy_trend,
-    _render_full_plan,
+    _render_plan_link,
+    _render_plan_page_sections,
     _render_recent_runs,
     _render_this_week,
     _render_zone_trend,
@@ -231,17 +232,104 @@ def test_easy_trend_table_is_wrapped_for_horizontal_scroll(two_week_env):
         assert '<div class="table-scroll">' in html
 
 
-def test_full_plan_wraps_instead_of_forcing_a_wide_unreadable_table(two_week_env):
-    """A <table> here forces every row onto one line (white-space: nowrap,
-    shared with every other table on the page) — fine for short numeric
-    cells, but the free-text "Sessions" column made rows so wide the page
-    either cut them off or shrank the whole table to an illegible size on a
-    phone. A wrapping block list sidesteps the problem."""
+def _plan_page(plan, db, today) -> str:
+    return "".join(_render_plan_page_sections(plan, db, today))
+
+
+def _week_block(html: str, n: int) -> str:
+    """The <details> element for week n."""
+    start = html.index(f"<b>Wk {n}</b>")
+    start = html.rindex("<details", 0, start)
+    return html[start:html.index("</details>", start)]
+
+
+def test_plan_page_shows_every_week_day_by_day(two_week_env):
+    plan, db = two_week_env
+    html = _plan_page(plan, db, date(2026, 3, 10))
+    for n in (1, 2):
+        assert f"<b>Wk {n}</b>" in html
+    # 7 day rows per week, including rest days, so the whole week is visible.
+    assert len(re.findall(r'<div class="pday[ "]', html)) == 14
+    assert "Long 22 km @ 7:00–7:20/km" in html
+
+
+def test_plan_page_marks_done_and_missed_runs(two_week_env):
+    """Resolution goes through fulfilled_slots, so a shifted run ticks the
+    slot it was prescribed for — the Sunday long run marks Saturday."""
+    plan, db = two_week_env
+    _save_run(db, 1, "2026-03-03", km=5.0)   # Tue — its own slot
+    _save_run(db, 2, "2026-03-08", km=20.0)  # Sun — Saturday's long run, shifted
+    wk1 = _week_block(_plan_page(plan, db, date(2026, 3, 10)), 1)
+    assert '<div class="pday done"><span class="pday-d">Tue 3</span>' in wk1
+    assert '<div class="pday done"><span class="pday-d">Sat 7</span>' in wk1
+    assert "missed" not in wk1
+
+
+def test_plan_page_marks_a_past_unrun_slot_missed_but_not_a_future_one(two_week_env):
+    plan, db = two_week_env
+    html = _plan_page(plan, db, date(2026, 3, 10))
+    assert '<div class="pday missed"><span class="pday-d">Tue 3</span>' in _week_block(html, 1)
+    wk2 = _week_block(html, 2)
+    assert '<div class="pday"><span class="pday-d">Sat 14</span>' in wk2
+    # Today's unrun session is neither done nor missed yet.
+    assert '<div class="pday today"><span class="pday-d">Tue 10</span>' in wk2
+
+
+def test_plan_page_opens_and_anchors_the_current_week(two_week_env):
+    plan, db = two_week_env
+    html = _plan_page(plan, db, date(2026, 3, 10))
+    wk1, wk2 = _week_block(html, 1), _week_block(html, 2)
+    assert 'id="now"' in wk2 and " open" in wk2.split(">")[0]
+    assert 'id="now"' not in wk1 and " open" not in wk1.split(">")[0]
+    assert "past" in wk1.split(">")[0]
+
+
+def test_plan_page_before_the_plan_starts_points_at_week_one(two_week_env):
+    plan, db = two_week_env
+    wk1 = _week_block(_plan_page(plan, db, date(2026, 2, 20)), 1)
+    assert 'id="now"' in wk1
+
+
+def test_plan_page_shows_actual_km_only_for_started_weeks(two_week_env):
+    plan, db = two_week_env
+    _save_run(db, 1, "2026-03-03", km=5.0)
+    html = _plan_page(plan, db, date(2026, 3, 4))
+    assert '<span class="wk-km">5 / 25 km</span>' in _week_block(html, 1)
+    assert '<span class="wk-km">27 km</span>' in _week_block(html, 2)
+
+
+def test_plan_page_carries_banners_notes_non_run_days_and_rules(tmp_path):
+    from test_training_plan import _write_plan
+
+    plan = TrainingPlan(str(_write_plan(tmp_path / "p.yaml")))
+    db = Database(tmp_path / "p.db")
+    html = _plan_page(plan, db, date(2026, 3, 4))
+    db.close()
+    assert "PHASE 1: TESTING (Weeks 1–1)" in html
+    assert "Fixture week." in html
+    assert 'class="pday nonrun"><span class="pday-d">Mon 2</span><span class="pday-desc">Foot/calf loading' in html
+    assert "TEST RULES" in html and "• Rule one." in html
+    assert "Long run 20 km" in html  # checkpoint
+    assert "Gel #1" in html          # race-day fuelling
+    assert "v9 (Aug 01): test fixture." in html
+
+
+def test_plan_page_escapes_plan_text(tmp_path):
+    from test_training_plan import _base_plan, _dump
+
+    raw = _base_plan()
+    raw["weeks"][0]["notes"] = "<script>alert(1)</script>"
+    plan = TrainingPlan(str(_dump(tmp_path / "p.yaml", raw)))
+    db = Database(tmp_path / "p.db")
+    html = _plan_page(plan, db, date(2026, 3, 4))
+    db.close()
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_dashboard_links_to_the_plan_page(two_week_env):
     plan, _ = two_week_env
-    html = _render_full_plan(plan)
-    assert "<table" not in html
-    assert 'class="plan-weeks"' in html
-    assert "Wk 1" in html and "Wk 2" in html
+    assert 'href="plan.html#now"' in _render_plan_link(plan)
 
 
 def test_this_week_grid_shows_pace_and_a_hover_title(two_week_env):
@@ -318,6 +406,14 @@ def test_run_dashboard_end_to_end_smoke(two_week_env, tmp_path, monkeypatch):
     assert html.rstrip().endswith("</html>")
     assert "Week 2" in html
     assert "None" not in html
+    assert 'href="plan.html#now"' in html
+
+    plan_html = (out_dir / "plan.html").read_text()
+    assert plan_html.startswith("<!doctype html>")
+    assert plan_html.rstrip().endswith("</html>")
+    assert 'http-equiv="refresh"' not in plan_html  # would collapse opened weeks
+    assert "None" not in plan_html
+    assert not list(out_dir.glob("*.tmp"))
 
 
 def test_run_dashboard_survives_a_render_error_and_keeps_the_prior_file(tmp_path, monkeypatch):
@@ -341,3 +437,26 @@ def test_run_dashboard_survives_a_render_error_and_keeps_the_prior_file(tmp_path
     assert ok is False
     assert alerts  # an alert was sent
     assert "PRIOR GOOD PAGE" in (out_dir / "index.html").read_text()  # untouched
+
+
+def test_a_plan_page_failure_leaves_both_prior_pages_untouched(two_week_env, tmp_path, monkeypatch):
+    """Both pages render before either is written — otherwise a fresh index
+    could go out linking to a stale or half-written plan page."""
+    _, db = two_week_env
+    db.close()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "index.html").write_text("PRIOR INDEX")
+    (out_dir / "plan.html").write_text("PRIOR PLAN")
+
+    def boom(*a, **kw):
+        raise RuntimeError("plan page broke")
+    monkeypatch.setattr("src.dashboard._render_plan_page_sections", boom)
+    monkeypatch.setattr("src.dashboard.send_error_alert", lambda msg: None)
+
+    ok = run_dashboard(db_path=tmp_path / "two_week.db", plan_path=tmp_path / "two_week.yaml",
+                       output_dir=out_dir)
+    assert ok is False
+    assert (out_dir / "index.html").read_text() == "PRIOR INDEX"
+    assert (out_dir / "plan.html").read_text() == "PRIOR PLAN"
+

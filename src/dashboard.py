@@ -506,26 +506,133 @@ def _render_ladder(plan: TrainingPlan, db: Database, today: date) -> str:
     return f'<section class="card"><h2>Long run ladder to race day</h2>{_svg_ladder(entries)}</section>'
 
 
-def _render_full_plan(plan: TrainingPlan) -> str:
-    # A <table> forces its cells onto one line (see the CSS `white-space:
-    # nowrap` rule shared by every other table on the page, which suits short
-    # numeric cells) — the "Sessions" text here is too long for that, and on a
-    # narrow phone that either overflows unreadably or gets crushed down to an
-    # illegible font size. A wrapping block list avoids the problem entirely.
+def _render_plan_link(plan: TrainingPlan) -> str:
+    return (
+        f'<a class="card link-card" href="plan.html#now">Full plan &rarr;'
+        f'<span class="hint">{len(plan.weeks)} weeks, day by day, with the rules and race-day plan</span></a>'
+    )
+
+
+# =========================================================================
+# Plan page (plan.html) — the whole plan, day by day
+# =========================================================================
+
+
+def _compact_sessions(week: TrainingWeek) -> str:
+    return " &middot; ".join(
+        f"{WEEKDAY_ABBR[i]} {_esc(r.workout_type)} {r.distance_km:g}km" for i, r in week.run_slots()
+    ) or "no runs"
+
+
+def _render_plan_week(week: TrainingWeek, done: set[date], actual_km: float | None,
+                      today: date, is_current: bool, is_open: bool) -> str:
     rows = []
-    for w in plan.weeks:
-        sessions = " &middot; ".join(
-            f"{WEEKDAY_ABBR[i]} {r.workout_type} {r.distance_km:g}km"
-            for i, r in w.run_slots()
-        ) or "rest week"
+    for i, abbr in enumerate(WEEKDAY_ABBR):
+        d = week.start_date + timedelta(days=i)
+        run = week.day(i)
+        if run.workout_type == "rest":
+            cls, mark = ["pday", "nonrun"], ""
+        elif d in done:
+            cls, mark = ["pday", "done"], "&check;"
+        elif d < today:
+            cls, mark = ["pday", "missed"], "&times;"
+        else:
+            cls, mark = ["pday"], ""
+        if d == today:
+            cls.append("today")
         rows.append(
-            f'<div class="plan-week"><div class="plan-week-head">'
-            f"<b>Wk {w.week_number}</b> {_esc(w.dates)} &middot; {_esc(w.phase)} "
-            f'&middot; {w.weekly_km_target:g}km target</div>'
-            f'<div class="plan-week-sessions">{sessions}</div></div>'
+            f'<div class="{" ".join(cls)}"><span class="pday-d">{abbr} {d.day}</span>'
+            f'<span class="pday-desc">{_esc(run.description)}</span>'
+            f'<span class="pday-st">{mark}</span></div>'
         )
-    return f'<details class="card"><summary>Full plan ({len(plan.weeks)} weeks)</summary>' \
-           f'<div class="plan-weeks">{"".join(rows)}</div></details>'
+    km = (f"{actual_km:g} / {week.weekly_km_target:g} km" if actual_km is not None
+          else f"{week.weekly_km_target:g} km")
+    notes = f'<div class="wk-notes">{_esc(week.notes)}</div>' if week.notes else ""
+    cls = " ".join(c for c in ["card", "wk", is_current and "current",
+                               week.end_date < today and "past"] if c)
+    anchor = ' id="now"' if is_current else ""
+    return (
+        f'<details class="{cls}"{anchor}{" open" if is_open else ""}>'
+        f'<summary><span class="wk-head"><span><b>Wk {week.week_number}</b> {_esc(week.dates)}'
+        f' &middot; {_esc(week.phase)}</span><span class="wk-km">{km}</span></span>'
+        f'<span class="wk-sessions">{_compact_sessions(week)}</span></summary>'
+        f'{notes}<div class="pdays">{"".join(rows)}</div></details>'
+    )
+
+
+def _render_plan_reference(plan: TrainingPlan) -> list[str]:
+    out = []
+    if plan.pace_zones:
+        zones = "".join(
+            f'<div class="ref-row"><b>{_esc(z.run_type)}</b> &middot; {_esc(z.pace)}'
+            f'<div class="hint">{_esc(z.hr_zone)}{" — " + _esc(z.feel) if z.feel else ""}</div></div>'
+            for z in plan.pace_zones
+        )
+        out.append(f'<section class="card"><h2>Pace zones</h2>{zones}</section>')
+    if plan.benchmarks:
+        rows = "".join(
+            f'<div class="ref-row"><b>{_esc(b.checkpoint)}</b>'
+            f'{" &middot; " + _esc(b.when) if b.when else ""}'
+            f'<div>{_esc(b.target)}</div><div class="hint">{_esc(b.why)}</div></div>'
+            for b in plan.benchmarks
+        )
+        out.append(f'<section class="card"><h2>Checkpoints</h2>{rows}</section>')
+    for block in plan.guidance:
+        lines = "".join(f"<li>{_esc(line)}</li>" for line in block.lines)
+        out.append(f'<section class="card rules"><h2>{_esc(block.title)}</h2><ul>{lines}</ul></section>')
+    if plan.race_splits or plan.fueling:
+        rows = "".join(
+            f'<div class="ref-row"><b>{_esc(s.segment)}</b> &middot; {_esc(s.target_pace)}'
+            f'<span class="hint"> {_esc(s.cumulative_time)}</span></div>'
+            for s in plan.race_splits
+        ) + "".join(
+            f'<div class="ref-row"><b>{_esc(f.when)}</b> &middot; {_esc(f.what)}'
+            f'<div class="hint">{_esc(f.notes)}</div></div>'
+            for f in plan.fueling
+        )
+        out.append(f'<section class="card"><h2>Race day</h2>{rows}</section>')
+    return out
+
+
+def _render_plan_page_sections(plan: TrainingPlan, db: Database, today: date) -> list[str]:
+    days_to_race = (plan.race_date - today).days
+    race_line = (f"T-{days_to_race} days" if days_to_race > 0
+                 else "Race day" if days_to_race == 0 else "Race day has passed")
+    goal = f'<div class="sub">Goal: {_esc(plan.goal)}</div>' if plan.goal else ""
+    sections = [f"""
+<header class="top">
+  <a class="back" href="./">&larr; Dashboard</a>
+  <div class="eyebrow">{_esc(plan.title)}</div>
+  <h1>{_esc(plan.race_name)} &middot; {plan.race_date.strftime('%a %b %d, %Y')}</h1>
+  <div class="sub">{race_line} &middot; {len(plan.weeks)} weeks from {plan.start_date.strftime('%b %d')}</div>
+  {goal}
+</header>"""]
+    if plan.revision_note:
+        sections.append(
+            f'<details class="card"><summary>Why the plan looks like this</summary>'
+            f'<p class="why">{_esc(plan.revision_note)}</p></details>'
+        )
+
+    current = plan.get_week_for_date(today)
+    if current is None and today < plan.start_date:
+        current = plan.weeks[0]
+    actual = {s["week_number"]: s["actual_km"]
+              for s in _weekly_volume_series(plan, db, plan.start_date, today)
+              if s["start_date"] <= today}
+    banners = dict(plan.section_markers)
+    for week in plan.weeks:
+        if week.week_number in banners:
+            sections.append(f'<h3 class="phase-banner">{_esc(banners[week.week_number])}</h3>')
+        is_current = current is not None and week.week_number == current.week_number
+        is_next = current is not None and week.week_number == current.week_number + 1
+        done = fulfilled_slots(plan, db, week) if week.start_date <= today else set()
+        sections.append(_render_plan_week(
+            week, done, actual.get(week.week_number), today, is_current, is_current or is_next,
+        ))
+
+    sections.append('<h3 class="phase-banner">Reference</h3>')
+    sections.extend(_render_plan_reference(plan))
+    return sections
 
 
 def _render_weekly_volume(plan: TrainingPlan, db: Database, today: date) -> str:
@@ -667,11 +774,33 @@ h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; ga
   padding: 14px 16px; margin-bottom: 14px;
 }
 .card summary { cursor: pointer; font-size: 15px; font-weight: 600; }
-.plan-weeks { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
-.plan-week { border-top: 1px solid var(--line); padding-top: 8px; font-size: 12.5px; }
-.plan-week-head { color: var(--ink-2); }
-.plan-week-head b { color: var(--ink); }
-.plan-week-sessions { margin-top: 2px; }
+.link-card { display: flex; flex-direction: column; gap: 2px; text-decoration: none;
+  color: var(--ink); font-weight: 600; }
+.back { font-size: 13px; color: var(--accent); text-decoration: none; }
+.why { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
+.phase-banner { font-size: 12px; font-weight: 700; color: var(--ink-2); text-transform: uppercase;
+  letter-spacing: .04em; margin: 22px 2px 8px; }
+.wk { padding: 10px 14px; margin-bottom: 8px; scroll-margin-top: 12px; }
+.wk.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.wk.past { opacity: .7; }
+.wk summary { font-weight: 400; }
+.wk-head { display: inline-flex; justify-content: space-between; gap: 10px;
+  width: calc(100% - 18px); font-size: 14px; }
+.wk-km { color: var(--ink-2); white-space: nowrap; }
+.wk-sessions { display: block; font-size: 12px; color: var(--ink-2); margin: 2px 0 0 18px; }
+.wk-notes { font-size: 12.5px; color: var(--ink-2); margin: 10px 0 4px; }
+.pdays { margin-top: 6px; }
+.pday { display: grid; grid-template-columns: 52px 1fr 18px; gap: 8px; padding: 6px 0;
+  border-top: 1px solid var(--line); font-size: 13px; }
+.pday-d { color: var(--ink-2); font-size: 12px; }
+.pday.nonrun .pday-desc { color: var(--ink-2); }
+.pday.today .pday-d { color: var(--accent); font-weight: 700; }
+.pday.done .pday-st { color: var(--good); font-weight: 700; }
+.pday.missed .pday-st { color: var(--bad); font-weight: 700; }
+.ref-row { font-size: 13px; padding: 6px 0; border-top: 1px solid var(--line); }
+.ref-row:first-of-type { border-top: 0; }
+.rules ul { list-style: none; margin: 0; padding: 0; }
+.rules li { font-size: 13px; padding: 4px 0; }
 .empty { color: var(--muted); font-size: 13px; }
 .chips { display: flex; gap: 10px; flex-wrap: wrap; }
 .chip {
@@ -722,15 +851,16 @@ footer { text-align: center; font-size: 11px; color: var(--muted); margin-top: 2
 """
 
 
-def _render_page(sections: list[str], generated_at: datetime) -> str:
+def _render_page(sections: list[str], generated_at: datetime, *, title: str = "Rundash",
+                 refresh: bool = True) -> str:
     body = "\n".join(sections)
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="900">
-<title>Rundash</title>
+{'<meta http-equiv="refresh" content="900">' if refresh else ""}
+<title>{title}</title>
 <style>{CSS}</style>
 </head>
 <body>
@@ -778,22 +908,30 @@ def run_dashboard(
             _render_recovery(db.get_latest_wellness()),
             _render_this_week(plan, db, week, today),
             _render_ladder(plan, db, today),
-            _render_full_plan(plan),
+            _render_plan_link(plan),
             _render_weekly_volume(plan, db, today),
             _render_zone_trend(plan, db),
             _render_easy_trend(plan, recent),
             _render_recent_runs(plan, recent),
         ]
 
-        html = _render_page(sections, datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        html = _render_page(sections, now)
+        # No auto-refresh: a reload would collapse the weeks you opened.
+        plan_html = _render_page(_render_plan_page_sections(plan, db, today), now,
+                                 title="Plan", refresh=False)
 
+        # Both pages render before either is written, so a failure leaves the
+        # previous pair intact rather than a new index linking to a stale plan.
         output_dir.mkdir(parents=True, exist_ok=True)
-        target = output_dir / "index.html"
-        tmp = output_dir / "index.html.tmp"
-        tmp.write_text(html, encoding="utf-8")
-        os.replace(tmp, target)
+        for name, content in (("plan.html", plan_html), ("index.html", html)):
+            target = output_dir / name
+            tmp = output_dir / f"{name}.tmp"
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, target)
 
-        log.info("Dashboard regenerated: %s (%d bytes)", target, len(html))
+        log.info("Dashboard regenerated in %s (index %d bytes, plan %d bytes)",
+                 output_dir, len(html), len(plan_html))
         return True
     except Exception as e:
         log.exception("Dashboard generation failed")

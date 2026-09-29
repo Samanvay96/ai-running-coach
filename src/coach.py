@@ -11,7 +11,7 @@ from .training_plan import ResolvedRun, TrainingPlan, TrainingWeek
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-5"
+MODEL = "claude-sonnet-5-5"
 
 
 def _extract_text(response) -> str:
@@ -22,11 +22,18 @@ def _extract_text(response) -> str:
     case `next(...)` would raise StopIteration with an empty str(). This
     helper surfaces stop_reason and block types so failures are debuggable.
     """
+    stop_reason = getattr(response, "stop_reason", "?")
+    if stop_reason == "refusal":
+        # Any text before a mid-stream decline is a fragment, not a reply.
+        details = getattr(response, "stop_details", None)
+        raise RuntimeError(
+            f"Model declined the request (category={getattr(details, 'category', None)}, "
+            f"explanation={getattr(details, 'explanation', None)!r})"
+        )
     for block in response.content:
         if getattr(block, "type", None) == "text":
             return block.text
     block_types = [getattr(b, "type", "?") for b in response.content]
-    stop_reason = getattr(response, "stop_reason", "?")
     usage = getattr(response, "usage", "?")
     raise RuntimeError(
         f"No text block in Anthropic response (stop_reason={stop_reason}, "
@@ -1413,6 +1420,9 @@ Keep the whole thing under 500 chars — runner is reading on phone half-awake. 
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=2048,
+            # The default effort (high) thinks before almost every reply, which
+            # can use up this cap before any text. Low skips thinking on simple asks.
+            output_config={"effort": "low"},
             system=[
                 {
                     "type": "text",
@@ -1498,6 +1508,9 @@ Keep the whole thing under 500 chars — runner is reading on phone half-awake. 
         response = self.client.messages.create(
             model=MODEL,
             max_tokens=2048,
+            # The default effort (high) thinks before almost every reply, which
+            # can use up this cap before any text. Low skips thinking on simple asks.
+            output_config={"effort": "low"},
             system=[
                 {
                     "type": "text",

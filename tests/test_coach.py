@@ -974,3 +974,70 @@ def test_easy_prompt_keeps_the_easy_run_zone_target(tmp_path):
     assert "does NOT apply" not in prompt
     assert "not meaningful on a quality session" not in prompt
 
+
+# ---------------- Claude Sonnet 5.5 ----------------
+#
+# Sonnet 5.5 recalibrated effort and defaults it to `high`, which thinks before
+# nearly every reply — enough, inside a 2048-token cap, to reproduce the
+# "thinking used the whole budget, no text" failure. The short-form calls pin
+# `low`; the long-form ones stay at `medium` with 8192 and streaming.
+
+
+def test_model_is_sonnet_5_5():
+    from src.coach import MODEL
+    assert MODEL == "claude-sonnet-5-5"
+
+
+def test_extract_text_reports_a_refusal_instead_of_returning_a_fragment():
+    """A mid-stream decline can leave partial text behind. That's a fragment,
+    not a reply, and the old 'increase max_tokens' hint would send the operator
+    the wrong way."""
+    resp = _response([_block("text", "Here is the start of")], stop_reason="refusal")
+    resp.stop_details = SimpleNamespace(category="general_harms", explanation="declined")
+    with pytest.raises(RuntimeError) as exc_info:
+        _extract_text(resp)
+    msg = str(exc_info.value)
+    assert "declined" in msg and "general_harms" in msg
+    assert "max_tokens" not in msg
+
+
+def test_extract_text_refusal_without_stop_details_still_raises():
+    with pytest.raises(RuntimeError, match="declined"):
+        _extract_text(_response([], stop_reason="refusal"))
+
+
+def test_chat_pins_low_effort(coach):
+    coach.client.messages.create.return_value = _response([_block("text", "ok")])
+    coach.chat("hi")
+    kw = coach.client.messages.create.call_args.kwargs
+    assert kw["model"] == "claude-sonnet-5-5"
+    assert kw["output_config"] == {"effort": "low"}
+
+
+def test_morning_brief_pins_low_effort(shift_env):
+    plan, db = shift_env
+    c = Coach(api_key="test-key", plan=plan, db=db)
+    c.client = MagicMock()
+    c.client.messages.create.return_value = _response([_block("text", "Stick with plan.")])
+    assert c.morning_brief(date(2026, 3, 3)) == "Stick with plan."
+    kw = c.client.messages.create.call_args.kwargs
+    assert kw["model"] == "claude-sonnet-5-5"
+    assert kw["output_config"] == {"effort": "low"}
+    assert kw["max_tokens"] == 2048
+
+
+def test_analyze_run_keeps_medium_effort_and_headroom(shift_env):
+    plan, db = shift_env
+    c = Coach(api_key="test-key", plan=plan, db=db)
+    c.client = MagicMock()
+    stream = _wire_stream(c.client, _response([_block("text", "ok")]))
+    c.analyze_run({
+        "start_time": "2026-03-03 08:00:00", "distance_km": 5.0, "duration_seconds": 1800,
+        "avg_pace_min_km": "6:00", "avg_hr": 140, "max_hr": 150,
+        "splits_json": "[]", "hr_zones_json": None,
+    })
+    kw = stream.call_args.kwargs
+    assert kw["model"] == "claude-sonnet-5-5"
+    assert kw["output_config"] == {"effort": "medium"}
+    assert kw["thinking"] == {"type": "adaptive"}
+    assert kw["max_tokens"] == 8192

@@ -448,6 +448,11 @@ def completed_run_dates(db: Database, week: TrainingWeek) -> set[date]:
     return out
 
 
+# Sessions meant to spend time above Zone 2. The easy-run yardsticks (≥80% of
+# time in Z1+Z2, low HR drift) don't apply to them.
+QUALITY_TYPES = ("tempo", "intervals", "mp_tempo")
+
+
 def fulfilled_slots(plan: TrainingPlan, db: Database, week: TrainingWeek) -> set[date]:
     """Prescribed-slot dates in `week` that some run actually satisfied.
 
@@ -986,6 +991,9 @@ COACHING STYLE:
             )
         else:
             drift_text = "Run too short to compute meaningfully"
+        is_quality = bool(prescribed and prescribed.workout_type in QUALITY_TYPES)
+        if drift and is_quality:
+            drift_text += " — not meaningful on a quality session, where pace changes by design"
 
         resolved_z2 = resolve_z2_bounds(self.db, self.plan)
         zone_dist_text = "N/A"
@@ -998,8 +1006,14 @@ COACHING STYLE:
                 z2_high,
             )
             if dist is not None:
+                target = (
+                    "quality session — the ≥80% easy target does NOT apply; Z3+ is expected "
+                    "during the work reps, so judge those against the prescribed HR band "
+                    "using the per-km splits"
+                    if is_quality else "target ≥80% on easy runs"
+                )
                 zone_dist_text = (
-                    f"Easy (Z1+Z2) {dist['easy_pct']}% (target ≥80% on easy runs) — "
+                    f"Easy (Z1+Z2) {dist['easy_pct']}% ({target}) — "
                     f"breakdown: Z1 {dist['z1_pct']}% | Z2 {dist['z2_pct']}% | "
                     f"Z3+ {dist['z3plus_pct']}% "
                     f"[Z2 band = {z2_low}-{z2_high} bpm; {z2_provenance}]"

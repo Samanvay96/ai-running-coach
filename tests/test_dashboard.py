@@ -460,3 +460,24 @@ def test_a_plan_page_failure_leaves_both_prior_pages_untouched(two_week_env, tmp
     assert (out_dir / "index.html").read_text() == "PRIOR INDEX"
     assert (out_dir / "plan.html").read_text() == "PRIOR PLAN"
 
+
+def test_zone_trend_leaves_out_tempo_runs(tmp_path):
+    """A tempo is meant to leave Zone 2. Plotted against the 80% easy target
+    it reads as a failed easy run."""
+    import json
+    from test_training_plan import _base_plan, _dump
+
+    raw = _base_plan()
+    raw["weeks"][0]["thu"] = {"type": "tempo", "km": 8}
+    plan = TrainingPlan(str(_dump(tmp_path / "p.yaml", raw)))
+    db = Database(tmp_path / "z.db")
+    zones = json.dumps([{"zoneNumber": 2, "secsInZone": 600}, {"zoneNumber": 4, "secsInZone": 600}])
+    for aid, day in ((1, "2026-03-03"), (2, "2026-03-05"), (3, "2026-03-07")):
+        _save_run(db, aid, day, km=8.0)
+        db.conn.execute("UPDATE activities SET hr_zones_json = ? WHERE activity_id = ?", (zones, aid))
+    db.conn.commit()
+    html = _render_zone_trend(plan, db)
+    db.close()
+    assert "2026-03-05" not in html  # Thursday's tempo
+    assert "2026-03-03" in html and "2026-03-07" in html
+    assert "tempo excluded" in html

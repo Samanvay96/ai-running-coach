@@ -35,6 +35,7 @@ from src.coach import (
     compute_zone_distribution,
     format_duration,
     format_pace,
+    QUALITY_TYPES,
     fulfilled_slots,
     resolve_z2_bounds,
 )
@@ -662,13 +663,15 @@ def _render_zone_trend(plan: TrainingPlan, db: Database) -> str:
         # make sense, and it keeps this chart consistent with the Recent Runs
         # table below, which already classifies shifted runs this way.
         resolved = plan.resolve_run_for_date(d, dates - {d})
+        if resolved and resolved.run.workout_type in QUALITY_TYPES:
+            continue  # meant to leave Z2 — would read as a failed easy run
         points.append({
             "date": st[:10],
             "pct": zd["easy_pct"] if zd else None,
             "workout_type": resolved.run.workout_type if resolved else "other",
         })
     return (
-        f'<section class="card"><h2>Time in Zone 1+2 <span class="hint">last {len(runs)} runs</span></h2>'
+        f'<section class="card"><h2>Time in Zone 1+2 <span class="hint">last {len(runs)} runs, tempo excluded</span></h2>'
         f'{_svg_zone_trend(points)}'
         f'<div class="legend"><span class="mk mk-legend-easy"></span>Easy/other'
         f'<span class="mk mk-legend-long"></span>Long/race</div></section>'

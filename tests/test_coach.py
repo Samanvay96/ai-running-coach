@@ -8,6 +8,7 @@ how `_extract_text` handles missing text blocks, run these.
 Run with: `.venv/bin/python -m pytest tests/`
 """
 
+import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -920,3 +921,56 @@ def test_analyze_run_uses_wellness_from_the_runs_own_date(shift_env):
     assert "RHR: 47 bpm" in prompt
     assert "HRV: 63.0ms" not in prompt
     assert "RHR: 46 bpm" not in prompt
+
+
+# ---------------- Quality sessions (tempo) ----------------
+#
+# The easy-run yardsticks — ≥80% of time in Z1+Z2, low HR drift — are wrong for
+# a tempo, which is meant to leave Zone 2. Without saying so, the prompt tells
+# the model every tempo was run too hard.
+
+_ZONES = json.dumps([
+    {"zoneNumber": 1, "secsInZone": 300}, {"zoneNumber": 2, "secsInZone": 900},
+    {"zoneNumber": 3, "secsInZone": 1200}, {"zoneNumber": 4, "secsInZone": 300},
+    {"zoneNumber": 5, "secsInZone": 0},
+])
+_SPLITS = json.dumps([
+    {"averageHR": hr, "averageSpeed": spd}
+    for hr, spd in [(140, 2.6), (160, 3.0), (162, 3.0), (164, 3.0), (145, 2.6), (141, 2.6)]
+])
+
+
+def _analyze_prompt(tmp_path, tue_session: dict) -> str:
+    from test_training_plan import _base_plan, _dump
+
+    raw = _base_plan()
+    raw["weeks"][0]["tue"] = tue_session
+    plan = TrainingPlan(str(_dump(tmp_path / "p.yaml", raw)))
+    db = Database(tmp_path / "q.db")
+    c = Coach(api_key="test-key", plan=plan, db=db)
+    c.client = MagicMock()
+    _wire_stream(c.client, _response([_block("text", "ok")]))
+    c.analyze_run({
+        "start_time": "2026-03-03 08:00:00", "distance_km": 8.0, "duration_seconds": 2700,
+        "avg_pace_min_km": "5:37", "avg_hr": 155, "max_hr": 168,
+        "splits_json": _SPLITS, "hr_zones_json": _ZONES,
+    })
+    db.close()
+    return c.client.messages.stream.call_args.kwargs["messages"][-1]["content"]
+
+
+def test_tempo_prompt_waives_the_easy_run_zone_target(tmp_path):
+    prompt = _analyze_prompt(tmp_path, {"type": "tempo", "km": 8, "pace": "HR 158–168",
+                                        "note": "2 × 10 min"})
+    assert "Tempo 8 km @ HR 158–168 — 2 × 10 min" in prompt
+    assert "the ≥80% easy target does NOT apply" in prompt
+    assert "target ≥80% on easy runs" not in prompt
+    assert "not meaningful on a quality session" in prompt
+
+
+def test_easy_prompt_keeps_the_easy_run_zone_target(tmp_path):
+    prompt = _analyze_prompt(tmp_path, {"type": "easy", "km": 8})
+    assert "target ≥80% on easy runs" in prompt
+    assert "does NOT apply" not in prompt
+    assert "not meaningful on a quality session" not in prompt
+

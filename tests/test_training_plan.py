@@ -450,9 +450,9 @@ def real() -> TrainingPlan:
     return TrainingPlan(str(REAL_PLAN))
 
 
-def test_real_plan_targets_manchester(real):
-    assert real.race_name == "Manchester Marathon"
-    assert real.race_date == date(2027, 4, 18)
+def test_real_plan_targets_edinburgh(real):
+    assert real.race_name == "Edinburgh Marathon"
+    assert real.race_date == date(2027, 5, 30)
     assert real.weeks[-1].sunday.workout_type == "race"
 
 
@@ -491,3 +491,20 @@ def test_real_plan_long_run_never_jumps_more_than_3km(real):
         if km:
             assert km - prior <= 3, f"week {n}: {prior} -> {km}"
             prior = max(prior, km)
+
+
+def test_real_plan_tempo_is_at_most_weekly_and_never_near_a_race(real):
+    for w in real.weeks:
+        types = [r.workout_type for _, r in w.run_slots()]
+        assert types.count("tempo") <= 1, f"week {w.week_number}"
+        if "race" in types:
+            assert "tempo" not in types, f"week {w.week_number}"
+    first = next(w for w in real.weeks if any(r.workout_type == "tempo" for _, r in w.run_slots()))
+    assert first.start_date > date(2026, 12, 12)  # not before the checkpoint
+
+
+def test_real_plan_tempo_is_run_by_hr_not_an_unset_mp(real):
+    for w in real.weeks:
+        for _, r in w.run_slots():
+            if r.workout_type == "tempo":
+                assert r.target_pace == "HR 158–168", f"week {w.week_number}"

@@ -470,17 +470,50 @@ def test_real_plan_prescribes_no_runs_while_trekking(real):
         trek += timedelta(days=1)
 
 
-def test_real_plan_checkpoint_is_a_21km_long_run_on_dec_12(real):
-    run = real.get_prescribed_run(date(2026, 12, 12))
+def test_real_plan_checkpoint_is_a_21km_long_run_on_dec_13(real):
+    run = real.get_prescribed_run(date(2026, 12, 13))
     assert run.workout_type == "long" and run.distance_km == 21
     assert "CHECKPOINT" in run.description
 
 
-def test_real_plan_goal_waits_for_the_checkpoint(real):
-    """Setting a goal from short-run evidence is exactly what not to do."""
+def test_real_plan_goal_is_tiered_and_mp_waits_for_the_checkpoint(real):
+    """Sub-4 is the A goal, not a promise — and no run is judged against an MP
+    before the Dec 12 checkpoint has produced one."""
     assert real.goal_pace == ""
-    assert "TBD" in real.goal
-    assert not any(r.finish_pace for w in real.weeks for _, r in w.run_slots())
+    assert "sub-4" in real.goal and "B:" in real.goal and "C:" in real.goal
+    for w in real.weeks:
+        for i, r in w.run_slots():
+            uses_mp = r.finish_pace or r.workout_type == "mp_tempo"
+            if uses_mp:
+                assert w.start_date + timedelta(days=i) > date(2026, 12, 13), f"week {w.week_number}"
+                # A placeholder, never an invented number, until MP is set.
+                assert "MP" in (r.finish_pace or r.target_pace), f"week {w.week_number}"
+
+
+def test_real_plan_has_the_10k_and_half_gates(real):
+    ten_k = real.get_prescribed_run(date(2027, 2, 18))
+    assert ten_k.workout_type == "race" and ten_k.distance_km == 10
+    half = real.get_prescribed_run(date(2027, 4, 18))
+    assert half.workout_type == "race" and half.distance_km == 21.1
+
+
+def test_real_plan_is_three_runs_a_week(real):
+    """The runner chose three runs a week; shakeouts and races sit outside that."""
+    for w in real.weeks:
+        runs = [r for _, r in w.run_slots() if r.workout_type not in ("race", "shakeout")]
+        assert len(runs) <= 3, f"week {w.week_number}: {len(runs)} runs"
+
+
+def test_real_plan_keeps_tennis_and_legs_off_the_day_before_key_runs(real):
+    """Tennis never precedes the long run or a race/test; leg strength never
+    precedes any quality run, long run or race."""
+    days = [(w.start_date + timedelta(days=i), w.day(i)) for w in real.weeks for i in range(7)]
+    for (_, before), (d, run) in zip(days, days[1:]):
+        text = before.description.lower()
+        if run.workout_type in ("long", "race"):
+            assert not text.startswith("tennis 1 h"), d
+        if run.workout_type in ("long", "race", "intervals", "tempo", "mp_tempo"):
+            assert "leg strength" not in text, d
 
 
 def test_real_plan_long_run_never_jumps_more_than_3km(real):
@@ -493,14 +526,32 @@ def test_real_plan_long_run_never_jumps_more_than_3km(real):
             prior = max(prior, km)
 
 
-def test_real_plan_tempo_is_at_most_weekly_and_never_near_a_race(real):
+def test_real_plan_quality_is_bounded_and_kept_off_race_weeks(real):
+    quality = ("tempo", "intervals", "mp_tempo")
     for w in real.weeks:
         types = [r.workout_type for _, r in w.run_slots()]
-        assert types.count("tempo") <= 1, f"week {w.week_number}"
+        assert sum(t in quality for t in types) <= 2, f"week {w.week_number}"
         if "race" in types:
-            assert "tempo" not in types, f"week {w.week_number}"
-    first = next(w for w in real.weeks if any(r.workout_type == "tempo" for _, r in w.run_slots()))
-    assert first.start_date > date(2026, 12, 12)  # not before the checkpoint
+            assert not any(t in quality for t in types), f"week {w.week_number}"
+
+    def first(kind):
+        return next(w for w in real.weeks if any(r.workout_type == kind for _, r in w.run_slots()))
+    # Tempo waits until after both trips; intervals until after the checkpoint.
+    assert first("tempo").start_date >= date(2026, 11, 23)
+    assert first("intervals").start_date > date(2026, 12, 13)
+
+
+def test_real_plan_long_runs_are_on_sunday_and_legs_get_their_own_day(real):
+    """The leg session is a full hour on a day of its own, and the long run
+    falls on Sunday — except around travel."""
+    travel = {7, 8}  # SF flight moves the long run to Friday; SF week is easy only
+    for w in real.weeks:
+        if w.week_number in travel:
+            continue
+        long_days = [i for i, r in w.run_slots() if r.workout_type == "long"]
+        assert long_days in ([], [6]), f"week {w.week_number}"
+        if w.friday.description.startswith("Leg strength — full hour"):
+            assert w.friday.workout_type == "rest" and w.thursday.workout_type != "long"
 
 
 def test_real_plan_tempo_is_run_by_hr_not_an_unset_mp(real):

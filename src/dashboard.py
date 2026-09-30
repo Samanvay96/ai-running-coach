@@ -369,7 +369,7 @@ def _render_header(plan: TrainingPlan, today: date, week: TrainingWeek | None, a
     stale_cls = " stale" if stale else ""
     return f"""
 <header class="top">
-  <div class="eyebrow">{_esc(plan.title) or "Training Dashboard"}</div>
+  <div class="eyebrow">{_esc(plan.race_name)}</div>
   <h1>{race_line}</h1>
   <div class="sub">{week_line}</div>
   <div class="freshness{stale_cls}">Data as of {_esc(ago)}</div>
@@ -854,7 +854,7 @@ footer { text-align: center; font-size: 11px; color: var(--muted); margin-top: 2
 """
 
 
-def _render_page(sections: list[str], generated_at: datetime, *, title: str = "Rundash",
+def _render_page(sections: list[str], generated_at: datetime, *, title: str,
                  refresh: bool = True) -> str:
     body = "\n".join(sections)
     return f"""<!doctype html>
@@ -863,7 +863,7 @@ def _render_page(sections: list[str], generated_at: datetime, *, title: str = "R
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {'<meta http-equiv="refresh" content="900">' if refresh else ""}
-<title>{title}</title>
+<title>{_esc(title)}</title>
 <style>{CSS}</style>
 </head>
 <body>
@@ -919,10 +919,10 @@ def run_dashboard(
         ]
 
         now = datetime.now(timezone.utc)
-        html = _render_page(sections, now)
+        html = _render_page(sections, now, title=plan.race_name)
         # No auto-refresh: a reload would collapse the weeks you opened.
         plan_html = _render_page(_render_plan_page_sections(plan, db, today), now,
-                                 title="Plan", refresh=False)
+                                 title=f"{plan.race_name} — Full plan", refresh=False)
 
         # Both pages render before either is written, so a failure leaves the
         # previous pair intact rather than a new index linking to a stale plan.

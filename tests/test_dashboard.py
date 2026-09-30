@@ -407,8 +407,12 @@ def test_run_dashboard_end_to_end_smoke(two_week_env, tmp_path, monkeypatch):
     assert "Week 2" in html
     assert "None" not in html
     assert 'href="plan.html#now"' in html
+    # Named after the race in the plan file, never a hardcoded one.
+    assert "<title>Test Marathon</title>" in html
+    assert '<div class="eyebrow">Test Marathon</div>' in html
 
     plan_html = (out_dir / "plan.html").read_text()
+    assert "<title>Test Marathon — Full plan</title>" in plan_html
     assert plan_html.startswith("<!doctype html>")
     assert plan_html.rstrip().endswith("</html>")
     assert 'http-equiv="refresh"' not in plan_html  # would collapse opened weeks

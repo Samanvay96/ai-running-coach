@@ -115,17 +115,17 @@ async def _send_document(path: Path, caption: str = ""):
         await bot.send_document(chat_id=TELEGRAM_CHAT_ID, document=f, filename=path.name, caption=caption)
 
 
-def send_backup_to_telegram(path: Path, caption: str = "") -> None:
-    """Synchronous wrapper to send a file (the DB backup) as a Telegram document.
+def send_backup_to_telegram(path: Path, caption: str = "") -> bool:
+    """Synchronous wrapper to send a file (a backup) as a Telegram document.
 
-    Best-effort with 3-attempt retry; logs warnings and returns None on final
-    failure (a missed backup is recoverable — it'll retry on the next activity
-    or the daily 02:00 timer).
+    Best-effort with 3-attempt retry: never raises, and returns whether the
+    upload landed so callers that must retry later (the plan backup) can tell.
     """
-    with_retry(
-        lambda: asyncio.run(_send_document(path, caption)),
+    sent = with_retry(
+        lambda: asyncio.run(_send_document(path, caption)) or True,
         _label=f"backup upload {path.name}",
     )
+    return sent is True
 
 
 # --- Interactive bot ---
@@ -160,7 +160,7 @@ class CoachBot:
             "/week - This week's plan\n"
             "/status - Recent training summary\n"
             "/lastrun - Re-send the most recent run analysis\n"
-            "/backup - Grab a fresh DB backup\n\n"
+            "/backup - Grab a fresh DB and plan backup\n\n"
             "Or just send me a message to chat about your training!",
         )
 
@@ -287,9 +287,10 @@ class CoachBot:
     async def cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        from .backup import run_backup
+        from .backup import backup_plan, run_backup
         try:
             path = run_backup()
+            plan_copy = backup_plan()
         except Exception as e:
             log.exception("Backup failed")
             await _reply(update, f"Backup failed: {e}")
@@ -300,6 +301,11 @@ class CoachBot:
                 filename=path.name,
                 caption=f"DB backup ({path.stat().st_size} bytes, gzipped)",
             )
+        if plan_copy:
+            with plan_copy.open("rb") as f:
+                await update.message.reply_document(
+                    document=f, filename=plan_copy.name, caption="Training plan (plan.yaml)",
+                )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):

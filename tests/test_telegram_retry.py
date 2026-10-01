@@ -96,11 +96,11 @@ def test_send_coaching_retries_three_times_then_reraises(monkeypatch):
 def test_send_backup_succeeds_on_first_attempt(monkeypatch):
     fake = _make_run([None])
     monkeypatch.setattr(telegram_bot.asyncio, "run", fake)
-    telegram_bot.send_backup_to_telegram(Path("/tmp/fake.gz"), caption="x")
+    assert telegram_bot.send_backup_to_telegram(Path("/tmp/fake.gz"), caption="x") is True
     assert fake.calls["n"] == 1
 
 
-def test_send_backup_retries_three_times_then_returns_none(monkeypatch):
+def test_send_backup_retries_three_times_then_returns_false(monkeypatch):
     """Backup is best-effort: a final failure must NOT raise (the poller's
     backup block already wraps in try/except, but the contract is no-raise)."""
     fake = _make_run([
@@ -111,12 +111,12 @@ def test_send_backup_retries_three_times_then_returns_none(monkeypatch):
     monkeypatch.setattr(telegram_bot.asyncio, "run", fake)
     # Must NOT raise
     result = telegram_bot.send_backup_to_telegram(Path("/tmp/fake.gz"), caption="x")
-    assert result is None
+    assert result is False
     assert fake.calls["n"] == 3
 
 
 def test_send_backup_succeeds_on_retry_after_transient_failure(monkeypatch):
     fake = _make_run([RuntimeError("simulated 502"), None])
     monkeypatch.setattr(telegram_bot.asyncio, "run", fake)
-    telegram_bot.send_backup_to_telegram(Path("/tmp/fake.gz"), caption="x")
+    assert telegram_bot.send_backup_to_telegram(Path("/tmp/fake.gz"), caption="x") is True
     assert fake.calls["n"] == 2

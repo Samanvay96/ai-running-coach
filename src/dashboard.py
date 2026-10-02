@@ -12,6 +12,7 @@ Anthropic, or listens on a socket.
 
 import logging
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -447,6 +448,29 @@ def _chip(label: str, value: str, sub: str = "") -> str:
     return f'<div class="chip"><span class="chip-label">{_esc(label)}</span><span class="chip-value">{_esc(value)}</span>{sub_html}</div>'
 
 
+def _event_label(description: str) -> tuple[str, str] | None:
+    """Short (label, detail) for a non-run day ("Tennis 1 h (flexible …)" ->
+    ("Tennis", "1 h")), or None for a plain rest day.
+
+    Non-run days in plan.yaml are free text — gym cardio, strength, tennis,
+    travel — and the full sentence doesn't fit a seventh of a phone screen, so
+    the cell keeps the first clause, split where the duration starts. The
+    whole text goes on the cell's title.
+    """
+    text = (description or "").strip()
+    clauses = [c.strip(" .") for c in re.split(r" — | \(| \+ |, |\. ", text) if c.strip(" .")]
+    # A bare place prefix ("SF — hotel gym bike …") says where, not what.
+    if len(clauses) > 1 and len(clauses[0]) <= 3:
+        clauses = clauses[1:]
+    if not clauses or clauses[0].lower() == "rest":
+        return None
+    clause = clauses[0]
+    m = re.search(r"\s\d", clause)
+    if m:
+        return clause[:m.start()].strip(), clause[m.start():].strip()
+    return clause, ""
+
+
 def _render_this_week(plan: TrainingPlan, db: Database, week: TrainingWeek | None, today: date) -> str:
     if not week:
         return '<section class="card"><h2>This week</h2><p class="empty">Outside plan window.</p></section>'
@@ -463,10 +487,19 @@ def _render_this_week(plan: TrainingPlan, db: Database, week: TrainingWeek | Non
                 status = "done"
             elif d < today:
                 status = "missed"
-        cls = " ".join(c for c in ["day", is_today and "today", status] if c)
-        if is_rest:
+        event = _event_label(run.description) if is_rest else None
+        cls = " ".join(c for c in ["day", is_today and "today", status, event and "event"] if c)
+        if event:
+            label, detail = event
+            body = f'<div class="day-type event">{_esc(label)}</div>'
+            if detail:
+                body += f'<div class="day-detail">{_esc(detail)}</div>'
+            title = f' title="{_esc(run.description)}"'
+        elif is_rest:
             body = '<div class="day-type rest">rest</div>'
-            title = ""
+            # "Rest — jet lag" keeps its reason on hover.
+            reason = run.description.strip()
+            title = f' title="{_esc(reason)}"' if reason.lower() != "rest" else ""
         else:
             body = (
                 f'<div class="day-type">{_esc(run.workout_type)}</div>'
@@ -818,6 +851,7 @@ h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; ga
 .day-name { font-size: 10.5px; color: var(--ink-2); text-transform: uppercase; }
 .day-type { font-size: 12px; font-weight: 600; margin-top: 3px; text-transform: capitalize; }
 .day-type.rest { color: var(--ink-2); font-weight: 400; }
+.day-type.event { font-weight: 500; text-transform: none; overflow-wrap: anywhere; }
 .day-detail { font-size: 11px; color: var(--ink-2); }
 .day-pace { font-size: 10px; color: var(--ink-2); margin-top: 1px; }
 .day[title] { cursor: help; }

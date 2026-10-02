@@ -15,6 +15,7 @@ import pytest
 
 from src.dashboard import (
     _acr_status,
+    _event_label,
     _ago_string,
     _longest_run_so_far,
     _render_easy_trend,
@@ -29,7 +30,7 @@ from src.dashboard import (
 )
 from src.db import Database
 from src.training_plan import TrainingPlan
-from test_training_plan import _write_two_week_plan
+from test_training_plan import _load, _write_two_week_plan
 
 
 def _save_run(db: Database, activity_id: int, day: str, km: float = 20.0) -> None:
@@ -342,6 +343,51 @@ def test_this_week_grid_shows_pace_and_a_hover_title(two_week_env):
     assert "day-pace" in html
     assert 'title="' in html
     assert re.search(r"\d:\d\d", html)  # some pace text made it into the cell
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Tennis 1 h (flexible — never the day before the long run)", ("Tennis", "1 h")),
+    ("Gym cardio 45–60 min easy (bike/elliptical/rower, HR ≤140) — recovery",
+     ("Gym cardio", "45–60 min easy")),
+    ("Upper-body strength + 15–20 min easy bike warm-up", ("Upper-body strength", "")),
+    ("Leg strength — full hour (calf raises = PF loading)", ("Leg strength", "")),
+    ("Travel home.", ("Travel home", "")),
+    ("SF — hotel gym bike 30–45 min easy", ("hotel gym bike", "30–45 min easy")),
+])
+def test_event_label_keeps_the_activity_and_its_duration(text, expected):
+    assert _event_label(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "Rest", "REST — jet lag", "SF — rest, adjust to the time zone."])
+def test_event_label_leaves_rest_days_as_rest(text):
+    assert _event_label(text) is None
+
+
+def test_this_week_grid_shows_non_run_days_instead_of_rest(tmp_path):
+    """String days (gym, strength, tennis) used to render as a bare "rest"
+    cell, hiding everything but the runs. Each now shows its short label
+    with the full plan text on the title; a real rest day stays "rest"."""
+    def mutate(p):
+        p["weeks"] = [{
+            "n": 1, "start": date(2026, 3, 2), "phase": "Test", "target_km": 5,
+            "mon": "Gym cardio 45–60 min easy (bike, HR ≤140)",
+            "tue": {"type": "easy", "km": 5},
+            "wed": "Tennis 1 h (flexible)",
+            "thu": "REST — jet lag",
+        }]
+    plan = _load(tmp_path, mutate)
+    db = Database(tmp_path / "c.db")
+    week = plan.get_week_for_date(date(2026, 3, 2))
+    html = _render_this_week(plan, db, week, date(2026, 3, 3))
+    cells = re.findall(r'<div class="day[^"]*"[^>]*>.*?(?=<div class="day[ "]|</div></section>)', html)
+    assert len(cells) == 7
+    assert "Gym cardio" in cells[0] and "45–60 min easy" in cells[0]
+    assert 'title="Gym cardio 45–60 min easy (bike, HR ≤140)"' in cells[0]
+    assert "Tennis" in cells[2] and "1 h" in cells[2]
+    assert ">rest<" in cells[3] and 'title="REST — jet lag"' in cells[3]
+    assert ">rest<" in cells[6] and "title=" not in cells[6]
+    # Non-run days are never marked missed.
+    assert "missed" not in cells[0]
 
 
 # ---------------- _render_recent_runs ----------------
